@@ -1,0 +1,276 @@
+// What a completed session does: versions, ALPN, client certificates, data in both directions at size, an
+// orderly close against a truncation, and the channel binding SCRAM-SHA-256-PLUS relies on.
+import { core::println, std::io::IoError, std::io::writeAll, std::collections::DynamicArray,
+         std::collections::FixedArray, std::collections::ConstView, std::fs::readText,
+         std::encoding::base64::decode as b64decode, std::encoding::base64::DecodeError,
+         std::digest::sha256::sha256,
+         tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion,
+         tls_tests::check, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig,
+         tls_tests::clientConfig, tls_tests::connect, tls_tests::drive, tls_tests::completed,
+         tls_tests::describe, tls_tests::carries, tls_tests::Session, tls_tests::Outcome };
+export { streamTests };
+
+// A connected, handshaken session between a Full-verifying client trusting the test CA and a server
+// presenting server.crt — or a setup failure, as a named check.
+type enum Setup { Ready(Session session), Failed(string why) }
+
+fn Setup ready(ref TlsConfig client, ref TlsConfig server) {
+    string localhost = "localhost";
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return Setup::Failed(why: e.message()); } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    if (!completed(o: o)) { return Setup::Failed(why: describe(o: o)); }
+    return Setup::Ready(session: give pair);
+}
+
+fn TlsConfig mustClient() {
+    string ca = "ca.crt";
+    Result<TlsConfig, TlsError> c = clientConfig(mode: Verify::Full, caName: ca);
+    return match (give c) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "client config: ${m}"); return mustClient(); } };
+}
+
+fn TlsConfig mustServer() {
+    string crt = "server.crt"; string key = "server.key";
+    Result<TlsConfig, TlsError> s = serverConfig(certName: crt, keyName: key);
+    return match (give s) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "server config: ${m}"); return mustServer(); } };
+}
+
+fn int32 versionCode(TlsVersion v) { return match (v) { case Tls12: 12; case Tls13: 13; }; }
+
+fn bool isVersion(Optional<TlsVersion> v, TlsVersion want) {
+    int32 wanted = versionCode(v: want);
+    return match (v) { case Some(value: got): versionCode(v: got) == wanted; case None: false; };
+}
+
+fn int32 versionTests() {
+    int32 f = 0;
+    TlsConfig c13 = mustClient();
+    TlsConfig s13 = mustServer();
+    Setup d = ready(client: c13, server: s13);
+    match (give d) {
+        case Ready(session: p): {
+            f = f + check(ok: isVersion(v: p.c().protocolVersion(), want: TlsVersion::Tls13), what: "version: TLS 1.3 by default");
+            string suite = p.c().cipherSuite();
+            f = f + check(ok: suite.length() > 0, what: "version: the cipher suite has a name");
+            string hello = "hello, server";
+            string back = "hello, client";
+            f = f + check(ok: carries(from: p.c(), to: p.s(), msg: hello.bytes()), what: "data: client to server");
+            f = f + check(ok: carries(from: p.s(), to: p.c(), msg: back.bytes()), what: "data: server to client");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "version: default handshake (".concat(other: w).concat(other: ")")); }
+    };
+    TlsConfig c12 = mustClient();
+    Result<Unit, TlsError> pin = c12.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12);
+    bool pinned = match (give pin) { case Ok(value: u): true; case Err(error: e): false; };
+    f = f + check(ok: pinned, what: "version: a client can be held to TLS 1.2");
+    TlsConfig s12 = mustServer();
+    Setup d12 = ready(client: c12, server: s12);
+    match (give d12) {
+        case Ready(session: p): {
+            f = f + check(ok: isVersion(v: p.s().protocolVersion(), want: TlsVersion::Tls12), what: "version: TLS 1.2 when the client asks for it");
+            string hello = "over TLS 1.2";
+            f = f + check(ok: carries(from: p.c(), to: p.s(), msg: hello.bytes()), what: "data: over TLS 1.2");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "version: TLS 1.2 handshake (".concat(other: w).concat(other: ")")); }
+    };
+    return f;
+}
+
+fn int32 alpnTests() {
+    int32 f = 0;
+    string pg = "postgresql";
+    TlsConfig c = mustClient();
+    TlsConfig s = mustServer();
+    Result<Unit, TlsError> ca = c.alpn(protocol: pg);
+    Result<Unit, TlsError> sa = s.alpn(protocol: pg);
+    bool clientSet = match (give ca) { case Ok(value: u): true; case Err(error: e): false; };
+    bool serverSet = match (give sa) { case Ok(value: u): true; case Err(error: e): false; };
+    bool set = clientSet && serverSet;
+    f = f + check(ok: set, what: "alpn: both sides offer \"postgresql\"");
+    Setup d = ready(client: c, server: s);
+    match (give d) {
+        case Ready(session: p): {
+            Optional<string> got = p.c().alpnProtocol();
+            bool agreed = match (give got) { case Some(value: v): v.equals(other: "postgresql"); case None: false; };
+            f = f + check(ok: agreed, what: "alpn: the client sees \"postgresql\" agreed");
+            Optional<string> sgot = p.s().alpnProtocol();
+            bool sagreed = match (give sgot) { case Some(value: v): v.equals(other: "postgresql"); case None: false; };
+            f = f + check(ok: sagreed, what: "alpn: the server sees \"postgresql\" agreed");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "alpn: handshake (".concat(other: w).concat(other: ")")); }
+    };
+    // Mutating a configuration a session already uses is refused.
+    string late = "late.crt";
+    Result<Unit, TlsError> frozen = c.trustFile(path: late);
+    bool refused = match (give frozen) { case Ok(value: u): false; case Err(error: e): match (e) { case Config(code: k, detail: x): k == -4; case _: false; }; };
+    f = f + check(ok: refused, what: "config: a configuration in use is frozen");
+    return f;
+}
+
+fn int32 clientCertificateTests() {
+    int32 f = 0;
+    string ca = "ca.crt";
+    string caPath = certPath(name: ca);
+    // A server that requires a client certificate refuses a client without one...
+    TlsConfig s1 = mustServer();
+    Result<Unit, TlsError> v1 = s1.verify(mode: Verify::Chain);
+    Result<Unit, TlsError> t1 = s1.trustFile(path: caPath);
+    bool verifies = match (give v1) { case Ok(value: u): true; case Err(error: e): false; };
+    bool trusts = match (give t1) { case Ok(value: u): true; case Err(error: e): false; };
+    bool setup = verifies && trusts;
+    f = f + check(ok: setup, what: "client cert: a server can require one");
+    TlsConfig c1 = mustClient();
+    string localhost = "localhost";
+    Result<Session, TlsError> m1 = connect(client: c1, server: s1, name: localhost);
+    match (give m1) {
+        case Ok(value: p): {
+            Outcome o = drive(c: p.c(), s: p.s());
+            bool serverRefused = match (o) { case ServerFailed(error: e): true; case _: false; };
+            f = f + check(ok: serverRefused, what: "client cert: refused without one (".concat(other: describe(o: o)).concat(other: ")"));
+        }
+        case Err(error: e): { f = f + check(ok: false, what: "client cert: session"); }
+    };
+    // ...and accepts one that chains to its roots.
+    TlsConfig s2 = mustServer();
+    Result<Unit, TlsError> v2 = s2.verify(mode: Verify::Chain);
+    Result<Unit, TlsError> t2 = s2.trustFile(path: caPath);
+    TlsConfig c2 = mustClient();
+    string crt = certPath(name: "client.crt");
+    string key = certPath(name: "client.key");
+    string nopw = "";
+    Result<Unit, TlsError> id = c2.identityFiles(certificate: crt, key: key, password: nopw);
+    bool idOk = match (give id) { case Ok(value: u): true; case Err(error: e): false; };
+    f = f + check(ok: idOk, what: "client cert: a client can present one");
+    Setup d = ready(client: c2, server: s2);
+    bool done = match (give d) { case Ready(session: p): true; case Failed(why: w): false; };
+    f = f + check(ok: done, what: "client cert: accepted when it chains to the server's roots");
+    return f;
+}
+
+fn int32 transferTests() {
+    int32 f = 0;
+    TlsConfig c = mustClient();
+    TlsConfig s = mustServer();
+    Setup d = ready(client: c, server: s);
+    match (give d) {
+        case Ready(session: p): {
+            // 1 MiB, patterned, written whole and read back in whatever pieces the records make.
+            isize total = 1048576;
+            DynamicArray<uint8> data = DynamicArray.withCapacity(capacity: total);
+            isize i = 0;
+            while (i < total) { data.add(item: truncate<uint8>(i * 31 + 7)); i = i + 1; }
+            Result<Unit, IoError> w = writeAll(w: p.c(), bytes: data.view());
+            bool wrote = match (w) { case Ok(value: u): true; case Err(error: e): false; };
+            f = f + check(ok: wrote, what: "transfer: 1 MiB written");
+            FixedArray<uint8> buf = FixedArray.make(size: 65536);
+            isize got = 0;
+            bool same = true;
+            bool stuck = false;
+            while (got < total && !stuck) {
+                Result<isize, IoError> r = p.s().read(into: buf.viewMut());
+                isize n = match (r) { case Ok(value: k): k; case Err(error: e): -1; };
+                if (n <= 0) { stuck = true; }
+                else {
+                    isize j = 0;
+                    while (j < n) { if (buf[j] != data[got + j]) { same = false; } j = j + 1; }
+                    got = got + n;
+                }
+            }
+            f = f + check(ok: got == total && same, what: "transfer: 1 MiB arrives intact");
+
+            // An orderly close reads as end of stream.
+            Result<Unit, TlsError> closed = p.c().close();
+            bool sent = match (give closed) { case Ok(value: u): true; case Err(error: e): false; };
+            f = f + check(ok: sent, what: "close: close_notify sent");
+            Result<isize, IoError> after = p.s().read(into: buf.viewMut());
+            bool eof = match (after) { case Ok(value: k): k == 0; case Err(error: e): false; };
+            f = f + check(ok: eof, what: "close: the peer reads end of stream after close_notify");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "transfer: handshake (".concat(other: w).concat(other: ")")); }
+    };
+    return f;
+}
+
+fn int32 truncationTests() {
+    int32 f = 0;
+    TlsConfig c = mustClient();
+    TlsConfig s = mustServer();
+    Setup d = ready(client: c, server: s);
+    match (give d) {
+        case Ready(session: p): {
+            // The client's transport ends with no close_notify: the server must call that a truncation.
+            p.c().innerRefMut().shut();
+            FixedArray<uint8> buf = FixedArray.make(size: 1024);
+            Result<isize, IoError> r = p.s().read(into: buf.viewMut());
+            bool truncated = match (r) { case Err(error: e): match (e) { case UnexpectedEof: true; case _: false; }; case Ok(value: k): false; };
+            f = f + check(ok: truncated, what: "close: a transport that ends without close_notify is UnexpectedEof");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "truncation: handshake (".concat(other: w).concat(other: ")")); }
+    };
+    return f;
+}
+
+// The DER inside a PEM file, decoded here rather than by the code under test.
+fn DynamicArray<uint8> pemBody(const ref string path) {
+    Result<string, IoError> text = readText(path: path);
+    string pem = match (give text) { case Ok(value: t): give t; case Err(error: e): { panic(msg: "read pem"); return DynamicArray.empty(); } };
+    string b64 = "";
+    bool inside = false;
+    foreach (string line in pem.split(sep: "\n")) {
+        if (line.startsWith(prefix: "-----BEGIN")) { inside = true; }
+        else if (line.startsWith(prefix: "-----END")) { inside = false; }
+        else if (inside) { b64 = b64.concat(other: line.trim()); }
+    }
+    Result<DynamicArray<uint8>, DecodeError> der = b64decode(text: b64);
+    return match (give der) { case Ok(value: b): give b; case Err(error: e): { panic(msg: "base64"); return DynamicArray.empty(); } };
+}
+
+fn bool sameBytes(ConstView<uint8> a, ConstView<uint8> b) {
+    if (a.length() != b.length()) { return false; }
+    isize i = 0;
+    while (i < a.length()) { if (a[i] != b[i]) { return false; } i = i + 1; }
+    return true;
+}
+
+fn int32 channelBindingTests() {
+    int32 f = 0;
+    TlsConfig c = mustClient();
+    TlsConfig s = mustServer();
+    Setup d = ready(client: c, server: s);
+    match (give d) {
+        case Ready(session: p): {
+            DynamicArray<uint8> peer = p.c().peerCertificate();
+            string crt = certPath(name: "server.crt");
+            DynamicArray<uint8> der = pemBody(path: crt);
+            f = f + check(ok: peer.length() > 0 && sameBytes(a: peer.view(), b: der.view()), what: "binding: the peer certificate is server.crt's DER");
+            // server.crt is signed sha256WithRSAEncryption, so RFC 5929 hashes it with SHA-256.
+            DynamicArray<uint8> endPoint = p.c().tlsServerEndPoint();
+            InlineArray<uint8>#(32) want = sha256(bytes: der.view());
+            f = f + check(ok: endPoint.length() == 32 && sameBytes(a: endPoint.view(), b: want.view()), what: "binding: tls-server-end-point is SHA-256 of the DER");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "binding: handshake (".concat(other: w).concat(other: ")")); }
+    };
+    return f;
+}
+
+fn int32 systemTrustTests() {
+    Result<TlsConfig, TlsError> made = TlsConfig.client();
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "system trust: client config"); } };
+    Result<isize, TlsError> n = c.trustSystem();
+    return match (give n) {
+        case Ok(value: k): check(ok: k > 100, what: "system trust: the OS bundle loads (more than 100 roots)");
+        case Err(error: e): { string m = e.message(); println(s: "  SKIP system trust: ${m}"); return 0; }
+    };
+}
+
+fn int32 streamTests() {
+    int32 f = 0;
+    f = f + versionTests();
+    f = f + alpnTests();
+    f = f + clientCertificateTests();
+    f = f + transferTests();
+    f = f + truncationTests();
+    f = f + channelBindingTests();
+    f = f + systemTrustTests();
+    return f;
+}

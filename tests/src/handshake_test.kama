@@ -1,0 +1,200 @@
+// Client and server handshakes over the in-memory pipe, against the throwaway PKI tools/gen-certs.sh writes
+// (its directory arrives as KTLS_TEST_CERTS, set by tools/test.sh). Every expectation about a certificate is
+// one the openssl CLI agrees with: the files are made by it, and their DER is read back here independently.
+import { core::println, core::env, std::io::IoError, std::io::writeAll, std::collections::DynamicArray,
+         std::collections::FixedArray, std::collections::ConstView, std::fs::readText, std::encoding::base64::decode as b64decode,
+         std::encoding::base64::DecodeError, std::digest::sha256::sha256,
+         tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
+         tls_tests::check, tls_tests::PipeEnd, tls_tests::pipePair };
+export { handshakeTests, certPath, serverConfig, clientConfig, connect, drive, completed, describe, carries, Session, Outcome };
+
+// MBEDTLS_X509_BADCERT_* bits a rejection is expected to carry.
+comptime uint32 BADCERT_EXPIRED = 1ui32;
+comptime uint32 BADCERT_CN_MISMATCH = 4ui32;
+comptime uint32 BADCERT_NOT_TRUSTED = 8ui32;
+
+type enum Outcome { Both, ClientFailed(TlsError error), ServerFailed(TlsError error), Stalled }
+
+fn string certPath(const ref string name) {
+    Optional<string> dir = env(name: "KTLS_TEST_CERTS");
+    string d = match (give dir) { case Some(value: v): give v; case None: { panic(msg: "KTLS_TEST_CERTS is not set — run tools/test.sh"); return ""; } };
+    string slash = d.concat(other: "/");
+    return slash.concat(other: name);
+}
+
+fn Result<TlsConfig, TlsError> serverConfig(const ref string certName, const ref string keyName) {
+    Result<TlsConfig, TlsError> made = TlsConfig.server();
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return Result::Err(error: give e); } };
+    string cert = certPath(name: certName);
+    string key = certPath(name: keyName);
+    string nopw = "";
+    Result<Unit, TlsError> id = c.identityFiles(certificate: cert, key: key, password: nopw);
+    match (give id) { case Ok(value: u): { } case Err(error: e): { return Result::Err(error: give e); } };
+    return Result::Ok(value: give c);
+}
+
+fn Result<TlsConfig, TlsError> clientConfig(Verify mode, const ref string caName) {
+    Result<TlsConfig, TlsError> made = TlsConfig.client();
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return Result::Err(error: give e); } };
+    Result<Unit, TlsError> v = c.verify(mode: mode);
+    match (give v) { case Ok(value: u): { } case Err(error: e): { return Result::Err(error: give e); } };
+    if (caName.length() > 0) {
+        string ca = certPath(name: caName);
+        Result<Unit, TlsError> t = c.trustFile(path: ca);
+        match (give t) { case Ok(value: u): { } case Err(error: e): { return Result::Err(error: give e); } };
+    }
+    return Result::Ok(value: give c);
+}
+
+fn bool isDone(Progress p) { return match (p) { case Done: true; case _: false; }; }
+
+// Both handshakes in turn until both finish, one fails, or nothing moves.
+fn Outcome drive(ref TlsStream<PipeEnd> c, ref TlsStream<PipeEnd> s) {
+    bool cd = false;
+    bool sd = false;
+    int32 turns = 0;
+    while (turns < 64) {
+        if (!cd) {
+            Result<Progress, TlsError> r = c.handshake();
+            match (give r) { case Ok(value: p): { cd = isDone(p: p); } case Err(error: e): { return Outcome::ClientFailed(error: give e); } };
+        }
+        if (!sd) {
+            Result<Progress, TlsError> r = s.handshake();
+            match (give r) { case Ok(value: p): { sd = isDone(p: p); } case Err(error: e): { return Outcome::ServerFailed(error: give e); } };
+        }
+        if (cd && sd) { return Outcome::Both; }
+        turns = turns + 1;
+    }
+    return Outcome::Stalled;
+}
+
+fn string describe(const ref Outcome o) {
+    return match (o) {
+        case Both: "both handshakes completed";
+        case ClientFailed(error: e): "client: ".concat(other: e.message());
+        case ServerFailed(error: e): "server: ".concat(other: e.message());
+        case Stalled: "the handshake stalled";
+    };
+}
+
+fn bool completed(const ref Outcome o) { return match (o) { case Both: true; case _: false; }; }
+
+// The client's handshake failed on the server's certificate, with every bit in `want` set.
+fn bool rejectedWith(const ref Outcome o, uint32 want) {
+    return match (o) {
+        case ClientFailed(error: e): match (e) { case Certificate(flags: f, reasons: r): (f & want) == want; case _: false; };
+        case _: false;
+    };
+}
+
+// Write `msg` on one side and read exactly it back on the other. (`msg` is a view parameter rather than a
+// string so that indexing it is legal C — KAMA_GAPS.md, KTLS-2.)
+fn bool carries(ref TlsStream<PipeEnd> from, ref TlsStream<PipeEnd> to, ConstView<uint8> msg) {
+    Result<Unit, IoError> w = writeAll(w: from, bytes: msg);
+    match (w) { case Ok(value: u): { } case Err(error: e): { return false; } };
+    FixedArray<uint8> buf = FixedArray.make(size: 4096);
+    isize got = 0;
+    while (got < msg.length()) {
+        Result<isize, IoError> r = to.read(into: buf.viewMut());
+        isize n = match (r) { case Ok(value: k): k; case Err(error: e): -1; };
+        if (n <= 0) { return false; }
+        isize i = 0;
+        while (i < n) {
+            if (buf[i] != msg[got + i]) { return false; }
+            i = i + 1;
+        }
+        got = got + n;
+    }
+    return got == msg.length();
+}
+
+// A client over one end of a fresh pipe and a server over the other.
+type resource Session {
+    TlsStream<PipeEnd> client;
+    TlsStream<PipeEnd> server;
+    public ctor make(TlsStream<PipeEnd> client, TlsStream<PipeEnd> server) { this.client = give client; this.server = give server; }
+    public fn ref TlsStream<PipeEnd> c() { return this.client; }
+    public fn ref TlsStream<PipeEnd> s() { return this.server; }
+}
+
+fn Result<Session, TlsError> connect(const ref TlsConfig client, const ref TlsConfig server, const ref string name) {
+    DynamicArray<PipeEnd> ends = pipePair();
+    Optional<PipeEnd> sb = ends.pop();
+    Optional<PipeEnd> ca = ends.pop();
+    PipeEnd b = match (give sb) { case Some(value: x): give x; case None: { panic(msg: "pipe"); return Result::Err(error: TlsError::Closed); } };
+    PipeEnd a = match (give ca) { case Some(value: x): give x; case None: { panic(msg: "pipe"); return Result::Err(error: TlsError::Closed); } };
+    Result<TlsStream<PipeEnd>, TlsError> cs = TlsStream::<PipeEnd>.client(inner: give a, config: client, serverName: name);
+    TlsStream<PipeEnd> c = match (give cs) { case Ok(value: x): give x; case Err(error: e): { return Result::Err(error: give e); } };
+    Result<TlsStream<PipeEnd>, TlsError> ss = TlsStream::<PipeEnd>.server(inner: give b, config: server);
+    TlsStream<PipeEnd> s = match (give ss) { case Ok(value: x): give x; case Err(error: e): { return Result::Err(error: give e); } };
+    return Result::Ok(value: Session.make(client: give c, server: give s));
+}
+
+// One case: a client with `mode` trusting `ca`, a server presenting `certName`, the client asking for `name`.
+// Answers the outcome, or panics on a setup failure (a broken fixture, not a broken package).
+fn Outcome attempt(Verify mode, const ref string ca, const ref string certName, const ref string keyName, const ref string name) {
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: mode, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "client config: ${m}"); return Outcome::Stalled; } };
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: certName, keyName: keyName);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "server config: ${m}"); return Outcome::Stalled; } };
+    Result<Session, TlsError> made = connect(client: client, server: server, name: name);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "session: ${m}"); return Outcome::Stalled; } };
+    return drive(c: pair.c(), s: pair.s());
+}
+
+fn int32 verificationTests() {
+    int32 f = 0;
+    string ca = "ca.crt";
+    string other = "other-ca.crt";
+    string none = "";
+    string localhost = "localhost";
+    string loopback = "127.0.0.1";
+    string srvCrt = "server.crt"; string srvKey = "server.key";
+
+    Outcome o1 = attempt(mode: Verify::Full, ca: ca, certName: srvCrt, keyName: srvKey, name: localhost);
+    f = f + check(ok: completed(o: o1), what: "verify: Full against the test CA, by DNS name (".concat(other: describe(o: o1)).concat(other: ")"));
+    Outcome o2 = attempt(mode: Verify::Full, ca: ca, certName: srvCrt, keyName: srvKey, name: loopback);
+    f = f + check(ok: completed(o: o2), what: "verify: Full by IP address against an IP SAN (".concat(other: describe(o: o2)).concat(other: ")"));
+    string ecCrt = "server-ec.crt"; string ecKey = "server-ec.key";
+    Outcome o3 = attempt(mode: Verify::Full, ca: ca, certName: ecCrt, keyName: ecKey, name: localhost);
+    f = f + check(ok: completed(o: o3), what: "verify: an ECDSA P-256 server certificate (".concat(other: describe(o: o3)).concat(other: ")"));
+
+    string wrongCrt = "wronghost.crt"; string wrongKey = "wronghost.key";
+    Outcome o4 = attempt(mode: Verify::Full, ca: ca, certName: wrongCrt, keyName: wrongKey, name: localhost);
+    f = f + check(ok: rejectedWith(o: o4, want: BADCERT_CN_MISMATCH), what: "verify: Full rejects a certificate for another name (".concat(other: describe(o: o4)).concat(other: ")"));
+    Outcome o5 = attempt(mode: Verify::Chain, ca: ca, certName: wrongCrt, keyName: wrongKey, name: localhost);
+    f = f + check(ok: completed(o: o5), what: "verify: Chain accepts another name that chains to the CA (".concat(other: describe(o: o5)).concat(other: ")"));
+    Outcome o6 = attempt(mode: Verify::Full, ca: other, certName: srvCrt, keyName: srvKey, name: localhost);
+    f = f + check(ok: rejectedWith(o: o6, want: BADCERT_NOT_TRUSTED), what: "verify: Full rejects an untrusted CA (".concat(other: describe(o: o6)).concat(other: ")"));
+    Outcome o7 = attempt(mode: Verify::Chain, ca: other, certName: srvCrt, keyName: srvKey, name: localhost);
+    f = f + check(ok: rejectedWith(o: o7, want: BADCERT_NOT_TRUSTED), what: "verify: Chain rejects an untrusted CA too (".concat(other: describe(o: o7)).concat(other: ")"));
+    string expCrt = "expired.crt"; string expKey = "expired.key";
+    Outcome o8 = attempt(mode: Verify::Full, ca: ca, certName: expCrt, keyName: expKey, name: localhost);
+    f = f + check(ok: rejectedWith(o: o8, want: BADCERT_EXPIRED), what: "verify: Full rejects an expired certificate (".concat(other: describe(o: o8)).concat(other: ")"));
+    Outcome o9 = attempt(mode: Verify::None, ca: none, certName: expCrt, keyName: expKey, name: localhost);
+    f = f + check(ok: completed(o: o9), what: "verify: None accepts anything, by name (".concat(other: describe(o: o9)).concat(other: ")"));
+
+    f = f + noTrustTest();
+    return f;
+}
+
+// A verifying client with nothing to verify against is refused before it sends a byte.
+fn int32 noTrustTest() {
+    string none = "";
+    string localhost = "localhost";
+    string srvCrt = "server.crt"; string srvKey = "server.key";
+    Result<TlsConfig, TlsError> bare = clientConfig(mode: Verify::Full, caName: none);
+    TlsConfig client = match (give bare) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "verify: bare client config"); } };
+    Result<TlsConfig, TlsError> srv = serverConfig(certName: srvCrt, keyName: srvKey);
+    TlsConfig server = match (give srv) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "verify: server config"); } };
+    Result<Session, TlsError> s = connect(client: client, server: server, name: localhost);
+    TlsError why = match (give s) { case Ok(value: x): { return check(ok: false, what: "verify: a verifying client without trust roots is refused up front"); } case Err(error: e): give e; };
+    bool refused = match (why) { case Config(code: c, detail: d): c == -6; case _: false; };
+    return check(ok: refused, what: "verify: a verifying client without trust roots is refused up front");
+}
+
+fn int32 handshakeTests() {
+    int32 f = 0;
+    f = f + verificationTests();
+    return f;
+}

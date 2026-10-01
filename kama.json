@@ -7,7 +7,7 @@
   "publish": {
     "exclude": [
       ".claude/", ".github/", "tools/", "docs/",
-      "AGENTS.md", "AGENTS.package.md", "AGENTS.tls.md", "CLAUDE.md"
+      "AGENTS.md", "AGENTS.package.md", "AGENTS.tls.md", "CLAUDE.md", "KAMA_GAPS.md"
     ]
   },
   "modules": {

@@ -1,4 +1,5 @@
-export { TlsError, ready, version };
+import { std::io::IoError, std::collections::FixedArray };
+export { TlsError, TlsVersion, Verify, Progress, ready, version, errorText };
 
 // @kama/tls — TLS for kama: Mbed TLS 4.1 LTS, vendored and bound. Nothing cryptographic is written here; the
 // handshake, the record layer and X.509 are Mbed TLS's. This package adds the kama shape around them:
@@ -6,33 +7,67 @@ export { TlsError, ready, version };
 //   TlsStream<S>   a client or server TLS session over ANY `ReliableStream` S (a TcpStream, a UnixStream, an
 //                  in-memory pipe in the tests) — itself a `ReliableStream`, so every std stream helper and
 //                  every protocol written against the contract runs over TLS unchanged
-//   TlsConfig      trust roots, identity, verification mode, server name, ALPN, protocol versions
+//   TlsConfig      trust roots, identity, verification mode, ALPN, protocol versions — built once, shared by
+//                  every session made from it, on any isolate
 //
 // The rules every module holds:
 //   - Kama does all the socket I/O. Mbed TLS reads and writes memory buffers (a memory BIO), and kama moves
 //     those bytes over S. So TLS never touches a descriptor, a would-block is kama's `IoError::WouldBlock`,
 //     and a handshake can be tested in one thread with no network at all.
-//   - Verification is on unless it is turned off by name. A client with no trust roots refuses to connect
-//     rather than trusting everything.
+//   - Verification is on unless it is turned off by name: a client verifies the chain AND the server name by
+//     default, and refuses to start without trust roots rather than trusting everything.
 //   - A data error is a `Result`; a contract violation panics, as everywhere in kama.
 
 extern "ktls.h";
 extern fn int32 ktls_init();
 extern fn UnsafeConstPtr<uint8> ktls_version();
 extern fn usize ktls_strlen(UnsafeConstPtr<uint8> s);
+extern fn usize ktls_error_text(int32 code, UnsafePtr<uint8> buf, usize cap);
 extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
 
-// Everything that can go wrong in this package, as data.
+// Everything that can go wrong in this package, as data. Each variant that came from Mbed TLS keeps its
+// error code and its text, so a log line says what happened without a lookup.
 type enum TlsError implements Error {
     // The PSA crypto core refused to start — no entropy source, most likely. `status` is its psa_status_t.
-    CryptoInit(int32 status);
+    CryptoInit(int32 status),
+    // A configuration step failed: a file that does not parse, a key that does not match, a bad argument.
+    Config(int32 code, string detail),
+    // The peer's certificate did not verify. `flags` are Mbed TLS's MBEDTLS_X509_BADCERT_* bits; `reasons`
+    // says which in words ("The certificate validity has expired; …").
+    Certificate(uint32 flags, string reasons),
+    // The handshake failed for any other reason: no common version or cipher, an alert from the peer, a
+    // malformed message.
+    Handshake(int32 code, string detail),
+    // The transport under the session failed.
+    Io(IoError error),
+    // The transport ended before the handshake finished.
+    Closed;
 
     public const fn string message() {
         return match (this) {
             case CryptoInit(status: s): "the crypto core failed to initialise (psa_status_t ${s})";
+            case Config(code: c, detail: d): "TLS configuration: ${d}";
+            case Certificate(flags: f, reasons: r): "the peer's certificate was rejected: ${r}";
+            case Handshake(code: c, detail: d): "TLS handshake failed: ${d}";
+            case Io(error: e): "TLS transport: ".concat(other: e.message());
+            case Closed: "the connection closed during the TLS handshake";
         };
     }
 }
+
+// A protocol version, for `TlsConfig.versions` and `TlsStream.protocolVersion`.
+type enum TlsVersion { Tls12, Tls13 }
+
+// How much of the peer's certificate is checked.
+//   None   nothing: the connection is encrypted but the peer is not authenticated. Name it to get it.
+//   Chain  the certificate must chain to a trust root; its names are not compared (libpq's verify-ca).
+//   Full   the chain AND the server name (libpq's verify-full, every browser). A client's default.
+// A server takes `None` (no client certificate) or `Chain`/`Full` (require one that chains to its roots).
+type enum Verify { None, Chain, Full }
+
+// Where a non-blocking handshake stands. `WantRead`/`WantWrite`: wait until the transport is readable /
+// writable, then call `handshake()` again.
+type enum Progress { Done, WantRead, WantWrite }
 
 // Initialise the crypto core once per process. Every operation in this package calls it first, so a caller
 // never has to; it is exported for a program that wants to fail fast at startup instead of at first use.
@@ -46,4 +81,14 @@ unsafe fn Result<Unit, TlsError> ready() {
 unsafe fn string version() {
     UnsafeConstPtr<uint8> v = ktls_version();
     return kama_string_from_raw(src: v, start: 0, len: cast<isize>(ktls_strlen(s: v)));
+}
+
+// The text for an error code this package produced: an Mbed TLS error, or one of its own. A `TlsStream`
+// read or write that fails in the TLS engine (not in the transport) answers `IoError::Other(code)` with one of
+// these codes — always negative, where an operating-system error number never is.
+unsafe fn string errorText(int32 code) {
+    FixedArray<uint8> buf = FixedArray.make(size: 256);
+    isize len = cast<isize>(ktls_error_text(code: code, buf: buf.dataPtrMut(), cap: 256));
+    if (len > 256) { len = 256; }
+    return kama_string_from_raw(src: buf.dataPtr(), start: 0, len: len);
 }

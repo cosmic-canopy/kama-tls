@@ -34,7 +34,16 @@ published until postgres has exercised its API, because a registry version is pe
   Its C symbols are `ktls_…`, because `kama_…` is reserved.
 - **Kama does the I/O.** Mbed TLS only ever sees memory buffers, and `TlsStream<S>` moves bytes over any
   `ReliableStream` S. So a handshake test needs no socket: `tests/` runs client and server over an in-memory
-  pipe, plus one loopback-TCP case with the server in its own isolate.
+  pipe (`tests/src/pipe.kama`), plus one loopback-TCP case with the server in its own isolate.
+- **`mbedtls_ssl_read` returns 0 for a transport that ended WITHOUT close_notify** (its documented contract)
+  and `MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY` for an orderly end. `ktls_read` turns those into `KTLS_TRUNCATED`
+  (→ `IoError::UnexpectedEof`) and `KTLS_CLOSED` (→ 0 bytes). Getting this backwards silently turns a
+  truncation into a clean EOF; the truncation test guards it.
+- **Mbed TLS 4 refuses a verifying client with no hostname.** Chain-only verification (`Verify::Chain`, libpq's
+  verify-ca) therefore still sets the name, for SNI, and a verify callback clears only the leaf's
+  CN-mismatch flag.
+- **Constants used by the generic `TlsStream<S>` are file-private functions, not `comptime` values**, because
+  of KTLS-1 in KAMA_GAPS.md. Change them back when it is fixed.
 - **Test certificates are generated** into `out/test-certs` by `tools/gen-certs.sh` and never tracked.
   `kama publish` refuses a tracked `*.key` or `*.pem`, and so does the registry.
 - **A gap goes in a `KAMA_GAPS.md` here the moment it is hit**, reduced to a repro and run on the named

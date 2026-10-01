@@ -1,0 +1,93 @@
+// One session over real sockets: the server in its own isolate (so the configuration crosses isolates), the
+// client verifying it fully by name, over loopback TCP on an ephemeral port. Everything else about TLS is
+// covered over the in-memory pipe; this proves the same stream over a `TcpStream`, blocking end to end.
+import { core::println, std::net::TcpListener, std::net::TcpStream, std::io::IoError, std::io::writeAll,
+         std::collections::FixedArray, std::concurrent::Channel, std::concurrent::Sender,
+         std::concurrent::Receiver,
+         tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify,
+         tls_tests::check, tls_tests::serverConfig, tls_tests::clientConfig };
+export { tcpTests };
+
+// What the server isolate needs, moved in whole: the listening socket, its configuration, and a way to report.
+type resource ServerJob implements Sendable {
+    TcpListener listener;
+    TlsConfig config;
+    Sender<int32> verdict;
+    public ctor make(TcpListener listener, TlsConfig config, Sender<int32> verdict) {
+        this.listener = give listener; this.config = give config; this.verdict = give verdict;
+    }
+    // Accept one client, answer "ping" with "pong", close in order. Reports 0, or the step that failed.
+    public fn void run() { int32 v = this.serve(); this.verdict.send(item: v); }
+    fn int32 serve() {
+        Result<TcpStream, IoError> a = this.listener.accept();
+        TcpStream sock = match (give a) { case Ok(value: s): give s; case Err(error: e): { return 1; } };
+        Result<TlsStream<TcpStream>, TlsError> made = TlsStream::<TcpStream>.server(inner: give sock, config: this.config);
+        TlsStream<TcpStream> tls = match (give made) { case Ok(value: t): give t; case Err(error: e): { return 2; } };
+        FixedArray<uint8> buf = FixedArray.make(size: 4);
+        isize got = 0;
+        while (got < 4) {
+            Result<isize, IoError> r = tls.read(into: buf.viewMut().slice(from: got, count: 4 - got));
+            isize n = match (r) { case Ok(value: k): k; case Err(error: e): -1; };
+            if (n <= 0) { return 3; }
+            got = got + n;
+        }
+        if (buf[0] != 112ui8 || buf[3] != 103ui8) { return 4; }   // "p…g"
+        string pong = "pong";
+        Result<Unit, IoError> w = writeAll(w: tls, bytes: pong.bytes());
+        match (w) { case Ok(value: u): { } case Err(error: e): { return 5; } };
+        Result<Unit, TlsError> c = tls.close();
+        return match (give c) { case Ok(value: u): 0; case Err(error: e): 6; };
+    }
+}
+
+fn void serve(ServerJob job) { job.run(); }
+
+fn int32 tcpTests() {
+    int32 f = 0;
+    string host = "127.0.0.1";
+    Result<TcpListener, IoError> bound = TcpListener.bind(host: host, port: 0ui16);
+    TcpListener listener = match (give bound) { case Ok(value: l): give l; case Err(error: e): { return check(ok: false, what: "tcp: bind a loopback port"); } };
+    uint16 port = match (listener.localAddr()) { case Ok(value: a): a.port; case Err(error: e): 0ui16; };
+    string crt = "server.crt"; string key = "server.key"; string ca = "ca.crt";
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: crt, keyName: key);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "tcp: server config"); } };
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "tcp: client config"); } };
+
+    Channel<int32> results = Channel.bounded(capacity: 1);
+    Receiver<int32> verdicts = results.receiver();
+    ServerJob job = ServerJob.make(listener: give listener, config: give server, verdict: results.sender());
+    string reply = "";
+    scope {
+        spawn serve(job: give job);
+        Result<TcpStream, IoError> conn = TcpStream.connect(host: host, port: port);
+        match (give conn) {
+            case Ok(value: sock): {
+                string localhost = "localhost";
+                Result<TlsStream<TcpStream>, TlsError> made = TlsStream::<TcpStream>.client(inner: give sock, config: client, serverName: localhost);
+                match (give made) {
+                    case Ok(value: tls): {
+                        string ping = "ping";
+                        Result<Unit, IoError> w = writeAll(w: tls, bytes: ping.bytes());
+                        f = f + check(ok: match (w) { case Ok(value: u): true; case Err(error: e): false; }, what: "tcp: the client writes over a verified session");
+                        FixedArray<uint8> buf = FixedArray.make(size: 16);
+                        isize got = 0;
+                        bool open = true;
+                        while (open) {
+                            Result<isize, IoError> r = tls.read(into: buf.viewMut().slice(from: got, count: 16 - got));
+                            isize n = match (r) { case Ok(value: k): k; case Err(error: e): -1; };
+                            if (n <= 0) { open = false; } else { got = got + n; }
+                        }
+                        f = f + check(ok: got == 4 && buf[0] == 112ui8 && buf[1] == 111ui8, what: "tcp: the server's \"pong\" arrives, then an orderly end");
+                    }
+                    case Err(error: e): { f = f + check(ok: false, what: "tcp: client session"); }
+                };
+            }
+            case Err(error: e): { f = f + check(ok: false, what: "tcp: connect"); }
+        };
+    }
+    Optional<int32> v = verdicts.recv();
+    int32 verdict = match (v) { case Some(value: x): x; case None: -1; };
+    f = f + check(ok: verdict == 0, what: "tcp: the server isolate accepted, answered and closed (step ${verdict})");
+    return f;
+}

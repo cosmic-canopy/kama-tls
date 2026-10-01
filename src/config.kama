@@ -1,0 +1,162 @@
+import { core::env, std::fs::exists, std::collections::ConstView, tls::TlsError, tls::TlsVersion, tls::Verify,
+         tls::errorText, tls::ready };
+export { TlsConfig };
+
+// A TLS configuration: the role, what to trust, who this side is, how much to verify, which application
+// protocols and versions to offer. Build it once, then make every session from it.
+//
+// It is shared, not copied: `share()` hands out another handle on the same configuration (an atomic
+// reference count in C), and every session made from it holds one too. So one configuration serves a whole
+// connection pool, on any isolate. Once a session exists it is frozen, and a setter answers
+// `TlsError::Config` instead of changing it under a live session.
+
+extern "ktls.h";
+extern fn UnsafePtr ktls_config_new(int32 server);
+extern fn void ktls_config_retain(UnsafePtr c);
+extern fn void ktls_config_release(UnsafePtr c);
+extern fn int32 ktls_config_verify(UnsafePtr c, int32 mode);
+extern fn int32 ktls_config_trust_file(UnsafePtr c, UnsafeConstPtr<cchar> path);
+extern fn int32 ktls_config_trust_pem(UnsafePtr c, UnsafeConstPtr<uint8> pem, usize len);
+extern fn int32 ktls_config_identity_files(UnsafePtr c, UnsafeConstPtr<cchar> cert, UnsafeConstPtr<cchar> key,
+                                           UnsafeConstPtr<cchar> password);
+extern fn int32 ktls_config_identity_pem(UnsafePtr c, UnsafeConstPtr<uint8> cert, usize cert_len,
+                                         UnsafeConstPtr<uint8> key, usize key_len,
+                                         UnsafeConstPtr<uint8> password, usize password_len);
+extern fn int32 ktls_config_alpn(UnsafePtr c, UnsafeConstPtr<uint8> protocol, usize len);
+extern fn int32 ktls_config_versions(UnsafePtr c, int32 min, int32 max);
+extern fn int32 ktls_config_trust_count(UnsafePtr c);
+
+// The CA bundles an operating system keeps, in the order they are tried by `trustSystem()`: Debian/Ubuntu,
+// RHEL/Fedora, openSUSE, Alpine and macOS (Apple maintains /etc/ssl/cert.pem from its own trust store).
+comptime isize SYSTEM_BUNDLES = 5;
+
+fn string systemBundle(isize i) {
+    if (i == 0) { return "/etc/ssl/certs/ca-certificates.crt"; }
+    if (i == 1) { return "/etc/pki/tls/certs/ca-bundle.crt"; }
+    if (i == 2) { return "/etc/ssl/ca-bundle.pem"; }
+    if (i == 3) { return "/etc/ssl/cert.pem"; }
+    return "/usr/local/etc/openssl/cert.pem";
+}
+
+unsafe fn int32 alpnOf(UnsafePtr c, ConstView<uint8> name) {
+    return ktls_config_alpn(c: c, protocol: name.dataPtr(), len: cast<usize>(name.length()));
+}
+
+// A negative code is an error; a positive one from a trust load counts certificates in the file that did not
+// parse and were skipped, which is not a failure.
+unsafe fn Result<Unit, TlsError> checked(int32 rc) {
+    if (rc >= 0) { return Result::Ok(value: Unit::Unit); }
+    return Result::Err(error: TlsError::Config(code: rc, detail: errorText(code: rc)));
+}
+
+type resource TlsConfig implements Sendable {
+    UnsafePtr handle;
+
+    unsafe ctor adopt(UnsafePtr handle) { this.handle = handle; }
+
+    // A client: verifies the server's chain and name (`Verify::Full`) until told otherwise, and offers TLS
+    // 1.2 and 1.3. Add trust roots before connecting — a verifying client without any refuses to start.
+    public unsafe ctor Result<TlsConfig, TlsError> client() { return TlsConfig.make(server: 0); }
+
+    // A server: needs an identity (`identityFiles` / `identityPem`) before it can accept, and asks for no
+    // client certificate until `verify(mode: Verify::Chain)`.
+    public unsafe ctor Result<TlsConfig, TlsError> server() { return TlsConfig.make(server: 1); }
+
+    unsafe ctor Result<TlsConfig, TlsError> make(int32 server) {
+        Result<Unit, TlsError> up = ready();
+        match (give up) {
+            case Ok(value: u): { }
+            case Err(error: e): { return Result::Err(error: give e); }
+        };
+        UnsafePtr h = ktls_config_new(server: server);
+        if (h == null) { return Result::Err(error: TlsError::Config(code: -3, detail: errorText(code: -3))); }
+        return Result::Ok(value: TlsConfig.adopt(handle: h));
+    }
+
+    // Another handle on this same configuration.
+    public unsafe const fn TlsConfig share() {
+        ktls_config_retain(c: this.handle);
+        return TlsConfig.adopt(handle: this.handle);
+    }
+
+    public unsafe fn Result<Unit, TlsError> verify(Verify mode) {
+        int32 m = match (mode) { case None: 0; case Chain: 1; case Full: 2; };
+        return checked(rc: ktls_config_verify(c: this.handle, mode: m));
+    }
+
+    // Trust the CA certificates in a PEM (or DER) file.
+    public unsafe fn Result<Unit, TlsError> trustFile(const ref string path) {
+        return checked(rc: ktls_config_trust_file(c: this.handle, path: path.cstr()));
+    }
+
+    // Trust the CA certificates in PEM text already in memory.
+    public unsafe fn Result<Unit, TlsError> trustPem(ConstView<uint8> pem) {
+        return checked(rc: ktls_config_trust_pem(c: this.handle, pem: pem.dataPtr(), len: cast<usize>(pem.length())));
+    }
+
+    // Trust what the operating system trusts: the file named by SSL_CERT_FILE if it is set (as OpenSSL
+    // honours it), else the first CA bundle found among the usual places. Answers how many certificates are
+    // trusted afterwards. Windows' certificate store is not read.
+    public unsafe fn Result<isize, TlsError> trustSystem() {
+        Optional<string> named = env(name: "SSL_CERT_FILE");
+        string chosen = "";
+        match (give named) {
+            case Some(value: p): { chosen = give p; }
+            case None: {
+                isize i = 0;
+                while (i < SYSTEM_BUNDLES && chosen.length() == 0) {
+                    string candidate = systemBundle(i: i);
+                    if (exists(path: candidate)) { chosen = copy candidate; }
+                    i = i + 1;
+                }
+            }
+        };
+        if (chosen.length() == 0) {
+            return Result::Err(error: TlsError::Config(code: -5, detail: "no system CA bundle found (set SSL_CERT_FILE)"));
+        }
+        Result<Unit, TlsError> loaded = this.trustFile(path: chosen);
+        return match (give loaded) {
+            case Ok(value: u): Result::Ok(value: this.trustCount());
+            case Err(error: e): Result::Err(error: give e);
+        };
+    }
+
+    // This side's certificate chain and private key, from PEM files. `password` decrypts an encrypted key;
+    // pass "" for an unencrypted one.
+    public unsafe fn Result<Unit, TlsError> identityFiles(const ref string certificate, const ref string key,
+                                                          const ref string password) {
+        return checked(rc: ktls_config_identity_files(c: this.handle, cert: certificate.cstr(),
+                                                              key: key.cstr(), password: password.cstr()));
+    }
+
+    // This side's certificate chain and private key, from PEM text already in memory.
+    public unsafe fn Result<Unit, TlsError> identityPem(ConstView<uint8> certificate, ConstView<uint8> key,
+                                                        ConstView<uint8> password) {
+        return checked(rc: ktls_config_identity_pem(c: this.handle,
+            cert: certificate.dataPtr(), cert_len: cast<usize>(certificate.length()),
+            key: key.dataPtr(), key_len: cast<usize>(key.length()),
+            password: password.dataPtr(), password_len: cast<usize>(password.length())));
+    }
+
+    // Offer (client) or accept (server) an application protocol by ALPN name, in preference order — e.g.
+    // "postgresql", "h2". At most eight.
+    public unsafe fn Result<Unit, TlsError> alpn(const ref string protocol) {
+        return checked(rc: alpnOf(c: this.handle, name: protocol.bytes()));
+    }
+
+    // The protocol versions to allow. The default is TLS 1.2 through 1.3.
+    public unsafe fn Result<Unit, TlsError> versions(TlsVersion min, TlsVersion max) {
+        int32 lo = match (min) { case Tls12: 771; case Tls13: 772; };
+        int32 hi = match (max) { case Tls12: 771; case Tls13: 772; };
+        return checked(rc: ktls_config_versions(c: this.handle, min: lo, max: hi));
+    }
+
+    // How many CA certificates are trusted.
+    public unsafe const fn isize trustCount() { return cast<isize>(ktls_config_trust_count(c: this.handle)); }
+
+    friend tls::TlsStream::client[raw];
+    friend tls::TlsStream::server[raw];
+    unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~TlsConfig() { if (this.handle != null) { ktls_config_release(c: this.handle); } }
+}

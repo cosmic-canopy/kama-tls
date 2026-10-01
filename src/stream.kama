@@ -1,0 +1,320 @@
+import { std::io::IoError, std::io::Reader, std::io::Writer, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
+         std::collections::FixedArray, std::collections::DynamicArray,
+         tls::TlsError, tls::TlsConfig, tls::TlsVersion, tls::Progress, tls::errorText };
+export { TlsStream };
+
+// A TLS session over a stream: `TlsStream<TcpStream>`, `TlsStream<UnixStream>`, or anything else that is a
+// `ReliableStream`. It is one itself, so a protocol written against the contract runs over TLS unchanged.
+//
+// The engine works on memory: ciphertext the peer sent is fed in, ciphertext for the peer is drained out, and
+// every byte crosses the transport through `inner.read` / `inner.write`. Over a blocking transport each call
+// blocks like the transport does. Over a non-blocking one a call answers `IoError::WouldBlock` (or
+// `Progress::WantRead`/`WantWrite` from `handshake()`); poll the transport's descriptor and call again.
+//
+// A read or write that fails in the TLS engine, rather than the transport, answers `IoError::Other(code)` with
+// the engine's negative error code; `errorText(code:)` says what it was. A peer that closes the transport
+// without a close_notify is `IoError::UnexpectedEof` — truncation, not an orderly end — and an orderly end
+// (close_notify) reads as 0 bytes, like end of file.
+
+extern "ktls.h";
+extern fn UnsafePtr ktls_session_new(UnsafePtr c, UnsafeConstPtr<cchar> server_name, UnsafePtr<int32> err);
+extern fn void ktls_session_free(UnsafePtr s);
+extern fn int32 ktls_feed(UnsafePtr s, UnsafeConstPtr<uint8> buf, usize len);
+extern fn void ktls_feed_eof(UnsafePtr s);
+extern fn usize ktls_out_pending(UnsafePtr s);
+extern fn usize ktls_out_peek(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn void ktls_out_consume(UnsafePtr s, usize n);
+extern fn int32 ktls_handshake(UnsafePtr s);
+extern fn int32 ktls_read(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn int32 ktls_write(UnsafePtr s, UnsafeConstPtr<uint8> buf, usize len);
+extern fn int32 ktls_close_notify(UnsafePtr s);
+extern fn uint32 ktls_verify_flags(UnsafePtr s);
+extern fn usize ktls_verify_text(uint32 flags, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_peer_cert(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_end_point(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_alpn(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_ciphersuite(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn int32 ktls_protocol(UnsafePtr s);
+extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
+
+// The engine's own answers (csrc/ktls.h) and the one Mbed TLS code this file tells apart, each pinned by a
+// _Static_assert in csrc/ktls.c. Spelled as functions, not `comptime` values: a file-private constant used by
+// this generic type is missing from the C when another package instantiates it (KAMA_GAPS.md, KTLS-1).
+fn int32 wantRead() { return -1; }              // KTLS_WANT_READ
+fn int32 closedByPeer() { return -2; }          // KTLS_CLOSED: close_notify received
+fn int32 truncated() { return -7; }             // KTLS_TRUNCATED: the transport ended without close_notify
+fn int32 certVerifyFailed() { return -9984; }   // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED (-0x2700)
+// The transport is read and written in pieces of this size: one full TLS record and its overhead.
+fn isize chunk() { return 17408; }
+
+fn bool isWouldBlock(const ref IoError e) { return match (e) { case WouldBlock: true; case _: false; }; }
+
+// A handshake error as the `IoError` a read or write that ran the handshake reports: the transport's own
+// error, end of stream, or the engine's code as `Other(code)` (see `errorText`).
+fn IoError ioErrorOf(const ref TlsError e) {
+    return match (e) {
+        case Io(error: x): x;
+        case Closed: IoError::UnexpectedEof;
+        case Certificate(flags: f, reasons: r): IoError::Other(code: certVerifyFailed());
+        case Handshake(code: c, detail: d): IoError::Other(code: c);
+        case Config(code: c, detail: d): IoError::Other(code: c);
+        case CryptoInit(status: st): IoError::Other(code: st);
+    };
+}
+
+type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Writer, Sendable when [S: Sendable] {
+    S inner;
+    UnsafePtr session;
+    FixedArray<uint8> scratch;   // transport bytes in transit, either direction
+    bool established = false;
+    bool finished = false;       // the peer sent close_notify
+
+    unsafe ctor adopt(S inner, UnsafePtr session) {
+        this.inner = give inner;
+        this.session = session;
+        this.scratch = FixedArray.make(size: chunk());
+        this.established = false;
+        this.finished = false;
+    }
+
+    // A client session over `inner`. `serverName` is sent as SNI and, under `Verify::Full`, is the name the
+    // server's certificate must carry (a DNS name or an IP address). The handshake runs on first use, or
+    // explicitly with `handshake()`.
+    public unsafe ctor Result<TlsStream<S>, TlsError> client(S inner, const ref TlsConfig config,
+                                                            const ref string serverName) {
+        return TlsStream::<S>.open(inner: give inner, config: config.raw(), name: serverName);
+    }
+
+    // A server session over an accepted `inner`.
+    public unsafe ctor Result<TlsStream<S>, TlsError> server(S inner, const ref TlsConfig config) {
+        string none = "";
+        return TlsStream::<S>.open(inner: give inner, config: config.raw(), name: none);
+    }
+
+    unsafe ctor Result<TlsStream<S>, TlsError> open(S inner, UnsafePtr config, const ref string name) {
+        int32 err = 0;
+        UnsafePtr s = ktls_session_new(c: config, server_name: name.cstr(), err: addr(of: err));
+        if (s == null) { return Result::Err(error: TlsError::Config(code: err, detail: errorText(code: err))); }
+        return Result::Ok(value: TlsStream::<S>.adopt(inner: give inner, session: s));
+    }
+
+    // Run the handshake as far as the transport allows. Over a blocking transport it runs to the end:
+    // `Progress::Done` or an error. Over a non-blocking one it may stop at `WantRead` / `WantWrite`.
+    public unsafe fn Result<Progress, TlsError> handshake() {
+        if (this.established) { return Result::Ok(value: Progress::Done); }
+        while (true) {
+            int32 rc = ktls_handshake(s: this.session);
+            // Whatever the engine produced goes out first: the next flight, or the alert explaining a failure.
+            Result<bool, IoError> pushed = this.pushOut();
+            bool allOut = false;
+            match (pushed) {
+                case Ok(value: v): { allOut = v; }
+                case Err(error: e): { return Result::Err(error: TlsError::Io(error: e)); }
+            };
+            if (rc == 0) {
+                if (!allOut) { return Result::Ok(value: Progress::WantWrite); }
+                this.established = true;
+                return Result::Ok(value: Progress::Done);
+            }
+            if (rc != wantRead()) { return Result::Err(error: this.failure(code: rc)); }
+            if (!allOut) { return Result::Ok(value: Progress::WantWrite); }
+            Result<isize, IoError> pulled = this.pullIn();
+            match (pulled) {
+                case Ok(value: n): {
+                    if (n == 0) { return Result::Err(error: TlsError::Closed); }
+                }
+                case Err(error: e): {
+                    if (isWouldBlock(e: e)) { return Result::Ok(value: Progress::WantRead); }
+                    return Result::Err(error: TlsError::Io(error: e));
+                }
+            };
+        }
+        return Result::Ok(value: Progress::Done);
+    }
+
+    // `Reader`: decrypted bytes into `into`. 0 means the peer closed the session in order (close_notify).
+    public unsafe fn Result<isize, IoError> read(View<uint8> into) {
+        if (into.length() == 0) { return Result::Ok(value: 0); }
+        Result<Unit, IoError> up = this.ensureHandshake();
+        match (up) { case Ok(value: u): { } case Err(error: e): { return Result::Err(error: e); } };
+        while (true) {
+            if (this.finished) { return Result::Ok(value: 0); }
+            int32 rc = ktls_read(s: this.session, buf: addr(of: into[0]), cap: cast<usize>(into.length()));
+            if (rc > 0) { return Result::Ok(value: cast<isize>(rc)); }
+            // A read can make the engine answer too (a TLS 1.3 key update, an alert); send it on.
+            Result<bool, IoError> pushed = this.pushOut();
+            match (pushed) { case Ok(value: v): { } case Err(error: e): { return Result::Err(error: e); } };
+            if (rc == closedByPeer()) { this.finished = true; return Result::Ok(value: 0); }
+            if (rc == truncated()) { return Result::Err(error: IoError::UnexpectedEof); }
+            if (rc != wantRead()) { return Result::Err(error: IoError::Other(code: rc)); }
+            Result<isize, IoError> pulled = this.pullIn();
+            match (pulled) {
+                case Ok(value: n): { }   // more ciphertext, or end of transport: the engine sees it next turn
+                case Err(error: e): { return Result::Err(error: e); }
+            };
+        }
+        return Result::Ok(value: 0);
+    }
+
+    // `Writer`: encrypt and send. Answers how many plaintext bytes were taken — at most one record's worth,
+    // so loop (or use `std::io::writeAll`). Over a non-blocking transport the ciphertext may not all have gone
+    // yet; `flush()` sends the rest.
+    public unsafe fn Result<isize, IoError> write(ConstView<uint8> bytes) {
+        if (bytes.length() == 0) { return Result::Ok(value: 0); }
+        Result<Unit, IoError> up = this.ensureHandshake();
+        match (up) { case Ok(value: u): { } case Err(error: e): { return Result::Err(error: e); } };
+        int32 rc = ktls_write(s: this.session, buf: bytes.dataPtr(), len: cast<usize>(bytes.length()));
+        if (rc < 0) { return Result::Err(error: IoError::Other(code: rc)); }
+        Result<bool, IoError> pushed = this.pushOut();
+        match (pushed) { case Ok(value: v): { } case Err(error: e): { return Result::Err(error: e); } };
+        return Result::Ok(value: cast<isize>(rc));
+    }
+
+    // `Writer`: send every pending ciphertext byte, then flush the transport.
+    public unsafe fn Result<Unit, IoError> flush() {
+        Result<bool, IoError> pushed = this.pushOut();
+        bool allOut = false;
+        match (pushed) { case Ok(value: v): { allOut = v; } case Err(error: e): { return Result::Err(error: e); } };
+        if (!allOut) { return Result::Err(error: IoError::WouldBlock); }
+        return this.inner.flush();
+    }
+
+    // `ReliableStream`: the transport's mode is the session's mode.
+    public unsafe fn Result<Unit, IoError> setNonBlocking(bool on) { return this.inner.setNonBlocking(on: on); }
+
+    // Close the session in order: send close_notify, so the peer can tell the end from a truncation. The
+    // transport stays open until this stream drops.
+    public unsafe fn Result<Unit, TlsError> close() {
+        int32 rc = ktls_close_notify(s: this.session);
+        if (rc < 0 && rc != wantRead()) { return Result::Err(error: TlsError::Handshake(code: rc, detail: errorText(code: rc))); }
+        Result<Unit, IoError> sent = this.flush();
+        return match (sent) {
+            case Ok(value: u): Result::Ok(value: Unit::Unit);
+            case Err(error: e): Result::Err(error: TlsError::Io(error: e));
+        };
+    }
+
+    // The peer's certificate as DER, empty if it sent none.
+    public unsafe fn DynamicArray<uint8> peerCertificate() {
+        return this.bytesFrom(which: 0);
+    }
+
+    // RFC 5929 tls-server-end-point channel binding: the hash of the server certificate, as SCRAM-SHA-256-PLUS
+    // and other channel-bound logins need it. Empty if there is no peer certificate.
+    public unsafe fn DynamicArray<uint8> tlsServerEndPoint() {
+        return this.bytesFrom(which: 1);
+    }
+
+    // The application protocol both sides agreed by ALPN, if any.
+    public unsafe fn Optional<string> alpnProtocol() {
+        DynamicArray<uint8> b = this.bytesFrom(which: 2);
+        if (b.length() == 0) { return Optional::None; }
+        return Optional::Some(value: kama_string_from_raw(src: b.view().dataPtr(), start: 0, len: b.length()));
+    }
+
+    // The negotiated cipher suite's name, e.g. "TLS1-3-AES-256-GCM-SHA384".
+    public unsafe fn string cipherSuite() {
+        DynamicArray<uint8> b = this.bytesFrom(which: 3);
+        if (b.length() == 0) { return ""; }
+        return kama_string_from_raw(src: b.view().dataPtr(), start: 0, len: b.length());
+    }
+
+    // The negotiated protocol version; None before the handshake completes.
+    public unsafe fn Optional<TlsVersion> protocolVersion() {
+        int32 v = ktls_protocol(s: this.session);
+        if (v == 771) { return Optional::Some(value: TlsVersion::Tls12); }
+        if (v == 772) { return Optional::Some(value: TlsVersion::Tls13); }
+        return Optional::None;
+    }
+
+    // The transport under the session — to poll its descriptor, or read its address.
+    public const fn const ref S innerRef() { return this.inner; }
+    public fn ref S innerRefMut() { return this.inner; }
+
+    // ---- inside the stream --------------------------------------------------------------------------------
+
+    // A read or write before the handshake runs it first, as one blocking step over a blocking transport.
+    unsafe fn Result<Unit, IoError> ensureHandshake() {
+        if (this.established) { return Result::Ok(value: Unit::Unit); }
+        Result<Progress, TlsError> p = this.handshake();
+        Progress where = Progress::WantRead;
+        match (give p) {
+            case Ok(value: prog): { where = prog; }
+            case Err(error: e): { return Result::Err(error: ioErrorOf(e: e)); }
+        };
+        bool done = match (where) { case Done: true; case _: false; };
+        if (done) { return Result::Ok(value: Unit::Unit); }
+        return Result::Err(error: IoError::WouldBlock);
+    }
+
+    // A failed handshake as data: a rejected certificate says which checks failed; anything else says why.
+    unsafe fn TlsError failure(int32 code) {
+        uint32 flags = ktls_verify_flags(s: this.session);
+        if (code == certVerifyFailed() && flags != 0ui32) {
+            FixedArray<uint8> text = FixedArray.make(size: 1024);
+            isize n = cast<isize>(ktls_verify_text(flags: flags, buf: text.dataPtrMut(), cap: 1024));
+            if (n > 1024) { n = 1024; }
+            return TlsError::Certificate(flags: flags, reasons: kama_string_from_raw(src: text.dataPtr(), start: 0, len: n));
+        }
+        return TlsError::Handshake(code: code, detail: errorText(code: code));
+    }
+
+    // Hand every pending ciphertext byte to the transport. Ok(true): all of it went. Ok(false): the transport
+    // would block, and the rest waits for the next call.
+    unsafe fn Result<bool, IoError> pushOut() {
+        while (ktls_out_pending(s: this.session) > 0) {
+            isize n = cast<isize>(ktls_out_peek(s: this.session, buf: this.scratch.dataPtrMut(), cap: cast<usize>(chunk())));
+            Result<isize, IoError> w = Result::Ok(value: 0);
+            borrow this.scratch.view() as pending {
+                w = this.inner.write(bytes: pending.slice(from: 0, count: n));
+            }
+            match (w) {
+                case Ok(value: k): { ktls_out_consume(s: this.session, n: cast<usize>(k)); }
+                case Err(error: e): {
+                    if (isWouldBlock(e: e)) { return Result::Ok(value: false); }
+                    return Result::Err(error: e);
+                }
+            };
+        }
+        return Result::Ok(value: true);
+    }
+
+    // Read one piece of ciphertext from the transport into the engine. Ok(0) is the end of the transport,
+    // which the engine is told about, so a session that was not closed in order reads as a truncation.
+    unsafe fn Result<isize, IoError> pullIn() {
+        Result<isize, IoError> r = this.inner.read(into: this.scratch.viewMut());
+        isize n = match (r) { case Ok(value: k): k; case Err(error: e): { return Result::Err(error: e); } };
+        if (n == 0) {
+            ktls_feed_eof(s: this.session);
+            return Result::Ok(value: 0);
+        }
+        int32 fed = ktls_feed(s: this.session, buf: this.scratch.dataPtr(), len: cast<usize>(n));
+        if (fed != 0) { return Result::Err(error: IoError::Other(code: fed)); }
+        return Result::Ok(value: n);
+    }
+
+    // One of the byte answers, at its full length: 0 the peer certificate, 1 the end-point hash, 2 the ALPN
+    // protocol, 3 the cipher suite.
+    unsafe fn DynamicArray<uint8> bytesFrom(int32 which) {
+        isize cap = 256;
+        while (true) {
+            FixedArray<uint8> buf = FixedArray.make(size: cap);
+            usize got = 0;
+            if (which == 0) { got = ktls_peer_cert(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else if (which == 1) { got = ktls_end_point(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else if (which == 2) { got = ktls_alpn(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else { got = ktls_ciphersuite(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            isize n = cast<isize>(got);
+            if (n <= cap) {
+                DynamicArray<uint8> result = DynamicArray.withCapacity(capacity: n);
+                isize i = 0;
+                while (i < n) { result.add(item: buf[i]); i = i + 1; }
+                return result;
+            }
+            cap = n;
+        }
+        return DynamicArray.empty();
+    }
+
+    unsafe ~TlsStream() { if (this.session != null) { ktls_session_free(s: this.session); } }
+}
