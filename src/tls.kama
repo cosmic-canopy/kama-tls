@@ -1,3 +1,5 @@
+export { TlsError, ready, version };
+
 // @kama/tls — TLS for kama: Mbed TLS 4.1 LTS, vendored and bound. Nothing cryptographic is written here; the
 // handshake, the record layer and X.509 are Mbed TLS's. This package adds the kama shape around them:
 //
@@ -13,3 +15,35 @@
 //   - Verification is on unless it is turned off by name. A client with no trust roots refuses to connect
 //     rather than trusting everything.
 //   - A data error is a `Result`; a contract violation panics, as everywhere in kama.
+
+extern "ktls.h";
+extern fn int32 ktls_init();
+extern fn UnsafeConstPtr<uint8> ktls_version();
+extern fn usize ktls_strlen(UnsafeConstPtr<uint8> s);
+extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
+
+// Everything that can go wrong in this package, as data.
+type enum TlsError implements Error {
+    // The PSA crypto core refused to start — no entropy source, most likely. `status` is its psa_status_t.
+    CryptoInit(int32 status);
+
+    public const fn string message() {
+        return match (this) {
+            case CryptoInit(status: s): "the crypto core failed to initialise (psa_status_t ${s})";
+        };
+    }
+}
+
+// Initialise the crypto core once per process. Every operation in this package calls it first, so a caller
+// never has to; it is exported for a program that wants to fail fast at startup instead of at first use.
+unsafe fn Result<Unit, TlsError> ready() {
+    int32 status = ktls_init();
+    if (status != 0) { return Result::Err(error: TlsError::CryptoInit(status: status)); }
+    return Result::Ok(value: Unit::Unit);
+}
+
+// The Mbed TLS version this package was built with, e.g. "4.1.1".
+unsafe fn string version() {
+    UnsafeConstPtr<uint8> v = ktls_version();
+    return kama_string_from_raw(src: v, start: 0, len: cast<isize>(ktls_strlen(s: v)));
+}

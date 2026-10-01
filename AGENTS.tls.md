@@ -10,18 +10,26 @@ published until postgres has exercised its API, because a registry version is pe
 
 - **Mbed TLS is vendored, never linked.** `tools/vendor-mbedtls.sh` pins one release, `mbedtls-4.1.1.tar.bz2`
   with its bundled TF-PSA-Crypto, by SHA256. It owns `third_party/mbedtls/` and the generated `csources`
-  block of `kama.json`, so do not hand-edit either. The release tarball carries the generated sources, so no
-  Python/CMake step runs. The configuration is selected the upstream way, with `MBEDTLS_CONFIG_FILE` and
-  `TF_PSA_CRYPTO_CONFIG_FILE` in `cflags` pointing at this package's reviewed headers in `csrc/`. That has
-  worked since kama 0.9.473 passes each flag as one argument, so `third_party/` stays byte-identical to the
-  release.
-- **The C this package writes is glue only** (`csrc/`):
-  - the memory-BIO session;
-  - the entropy callback (getentropy / BCryptGenRandom);
-  - the threading callbacks;
+  and `cincludes` blocks of `kama.json`, so do not hand-edit any of them. The release tarball carries the
+  generated sources, so no Python/CMake step runs.
+  - Only `.c`/`.h` files from the library directories are kept, byte-identical. The three optional
+    drivers (everest, p256-m, pqcp) are left out.
+  - The script fails on a license other than `Apache-2.0 OR GPL-2.0-or-later`, and on two include-path
+    directories sharing a header name.
+- **The configuration is upstream's default plus this package's deltas.** `cflags` set
+  `MBEDTLS_USER_CONFIG_FILE` / `TF_PSA_CRYPTO_USER_CONFIG_FILE` to `csrc/ktls_mbedtls_user_config.h` and
+  `csrc/ktls_crypto_user_config.h`. That works because kama 0.9.473 passes each flag as one argument. Each
+  `#undef`/`#define` there carries its reason, and a change to the configuration is a change to those
+  two files. Threading is on (isolates are OS threads); DTLS, renegotiation, socket I/O and persistent key
+  storage are off.
+- **The C this package writes is glue only** (`csrc/ktls.c`):
+  - a once-guard over `psa_crypto_init`;
+  - the memory-BIO session (phase 2);
   - error text into a caller buffer;
   - the RFC 5929 end-point hash;
   - a `_Static_assert` per size kama spells as a literal.
+
+  Entropy is Mbed TLS's builtin source (getrandom / getentropy / BCryptGenRandom).
 
   Its C symbols are `ktls_…`, because `kama_…` is reserved.
 - **Kama does the I/O.** Mbed TLS only ever sees memory buffers, and `TlsStream<S>` moves bytes over any

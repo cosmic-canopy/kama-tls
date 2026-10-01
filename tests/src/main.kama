@@ -2,7 +2,7 @@
 // are hermetic — a client and a server handshake over an in-memory pipe, or over loopback TCP with the server
 // in its own isolate — so they run anywhere `tools/test.sh` runs, debug and release. A failing case prints
 // its name, so the log says WHICH, not just that.
-import { core::println };
+import { core::println, tls::TlsError, tls::ready, tls::version };
 export { check };
 
 fn int32 check(bool ok, string what) {
@@ -10,9 +10,25 @@ fn int32 check(bool ok, string what) {
     return 0;
 }
 
+// The vendored library starts, and is the release tools/vendor-mbedtls.sh pins (its VERSION).
+fn int32 vendoringTests() {
+    int32 f = 0;
+    Result<Unit, TlsError> first = ready();
+    bool ok1 = match (first) { case Ok(value: u): true; case Err(error: e): false; };
+    f = f + check(ok: ok1, what: "vendoring: the PSA crypto core initialises");
+    Result<Unit, TlsError> again = ready();
+    bool ok2 = match (again) { case Ok(value: u): true; case Err(error: e): false; };
+    f = f + check(ok: ok2, what: "vendoring: a second ready() is a no-op success");
+    string v = version();
+    f = f + check(ok: v.equals(other: "4.1.1"), what: "vendoring: the linked Mbed TLS is the pinned 4.1.1");
+    return f;
+}
+
 fn int32 main() {
     int32 failed = 0;
+    failed = failed + vendoringTests();
     if (failed != 0) { println(s: "tls tests: ${failed} failed"); return 1; }
-    println(s: "tls tests: OK");
+    string v = version();
+    println(s: "tls tests: OK (Mbed TLS ${v})");
     return 0;
 }

@@ -1,0 +1,7 @@
+Mbed TLS 4.1.1 (with its bundled TF-PSA-Crypto)
+https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.1.1/mbedtls-4.1.1.tar.bz2
+sha256 3359a349e23db3d5536fcee032ae7b2ecbfc08972fab643089b5cbf2a375c98c
+
+Kept, byte-identical to the release (.c and .h only, plus both LICENSE files):
+  include library tf-psa-crypto/include tf-psa-crypto/core tf-psa-crypto/dispatch tf-psa-crypto/drivers/builtin tf-psa-crypto/platform tf-psa-crypto/utilities tf-psa-crypto/extras
+Not vendored (optional drivers, off in this package's configuration): drivers/everest, drivers/p256-m, drivers/pqcp
