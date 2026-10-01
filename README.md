@@ -52,7 +52,18 @@ running the script with a new version and reading the diff.
 
 ## License
 
-This package's own code is MIT; see [LICENSE](LICENSE). Mbed TLS is Apache-2.0 OR GPL-2.0-or-later; this
-package takes it under Apache-2.0, and its license travels with it in `third_party/mbedtls/`. Every vendored
-file carries that dual license, which the vendor script checks. A program that ships a binary built with this
-package should list Apache-2.0 (Mbed TLS) in its third-party notices.
+`@kama/tls` is licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. The vendored Mbed TLS is Apache-2.0 OR GPL-2.0-or-later, taken here under Apache-2.0; its
+license travels with it in `third_party/mbedtls/`, and every vendored file carries that dual license (the
+vendor script checks). A program that ships a binary built with this package lists Mbed TLS (Apache-2.0) in
+its third-party notices.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
+`@kama/tls` by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any
+additional terms or conditions.

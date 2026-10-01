@@ -1,7 +1,7 @@
 {
   "name": "@kama/tls",
   "version": "0.1.0",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "kind": "library",
   "kama": ">=0.9.486",
   "publish": {

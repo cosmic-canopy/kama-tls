@@ -8,6 +8,10 @@ All notable changes to this package are recorded here. The format follows
 
 Needs **kama ≥ 0.9.486**.
 
+### Changed
+- **Licensed under MIT OR Apache-2.0**, at your option, like kama itself (`LICENSE-MIT`, `LICENSE-APACHE`).
+  Copyright is Cosmic Canopy LLC and the kama contributors. Mbed TLS stays Apache-2.0 OR GPL-2.0-or-later.
+
 ### Added
 - The package scaffold: manifest, agent files, the hermetic test program (`tools/test.sh`).
 - Mbed TLS 4.1.1 (LTS) with TF-PSA-Crypto 1.2.0, vendored by `tools/vendor-mbedtls.sh` and compiled through
