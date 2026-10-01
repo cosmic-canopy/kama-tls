@@ -102,7 +102,10 @@ The emitted C passes `&(kama_string__bytes(...))` to `ConstView_uint8__op_index`
 index rather than `addr(of:)`.
 
 **Workaround here.** Bind the view first, or take it as a by-value `ConstView` parameter; the tests do the
-latter.
+latter. **Hit again in `@kama/postgres`** (its unit tests index `RowValues.value(column:)` directly), with the
+same workaround there. Every accessor that hands back a view invites this spelling, so it will keep coming
+up. Note that `.length()` on the same call result compiles fine (it is emitted through a compound literal),
+which makes the indexing failure more surprising.
 
 **Suggested fix.** Materialise the call result into a temporary before indexing it, or reject the
 expression in `check` with a "bind it to a local first" message, as was done for `addr(of:)`.
