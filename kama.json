@@ -1,0 +1,16 @@
+{
+  "name": "@kama/tls",
+  "version": "0.1.0",
+  "license": "MIT",
+  "kind": "library",
+  "kama": ">=0.9.486",
+  "publish": {
+    "exclude": [
+      ".claude/", ".github/", "tools/", "docs/",
+      "AGENTS.md", "AGENTS.package.md", "AGENTS.tls.md", "CLAUDE.md"
+    ]
+  },
+  "modules": {
+    ".": { "visibility": "public" }
+  }
+}

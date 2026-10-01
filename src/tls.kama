@@ -1,0 +1,15 @@
+// @kama/tls — TLS for kama: Mbed TLS 4.1 LTS, vendored and bound. Nothing cryptographic is written here; the
+// handshake, the record layer and X.509 are Mbed TLS's. This package adds the kama shape around them:
+//
+//   TlsStream<S>   a client or server TLS session over ANY `ReliableStream` S (a TcpStream, a UnixStream, an
+//                  in-memory pipe in the tests) — itself a `ReliableStream`, so every std stream helper and
+//                  every protocol written against the contract runs over TLS unchanged
+//   TlsConfig      trust roots, identity, verification mode, server name, ALPN, protocol versions
+//
+// The rules every module holds:
+//   - Kama does all the socket I/O. Mbed TLS reads and writes memory buffers (a memory BIO), and kama moves
+//     those bytes over S. So TLS never touches a descriptor, a would-block is kama's `IoError::WouldBlock`,
+//     and a handshake can be tested in one thread with no network at all.
+//   - Verification is on unless it is turned off by name. A client with no trust roots refuses to connect
+//     rather than trusting everything.
+//   - A data error is a `Result`; a contract violation panics, as everywhere in kama.

@@ -1,0 +1,18 @@
+// The package's own tests: one program, one `xxxTests()` per area, exit 0 when every case holds. All of them
+// are hermetic — a client and a server handshake over an in-memory pipe, or over loopback TCP with the server
+// in its own isolate — so they run anywhere `tools/test.sh` runs, debug and release. A failing case prints
+// its name, so the log says WHICH, not just that.
+import { core::println };
+export { check };
+
+fn int32 check(bool ok, string what) {
+    if (!ok) { println(s: "  FAIL ${what}"); return 1; }
+    return 0;
+}
+
+fn int32 main() {
+    int32 failed = 0;
+    if (failed != 0) { println(s: "tls tests: ${failed} failed"); return 1; }
+    println(s: "tls tests: OK");
+    return 0;
+}

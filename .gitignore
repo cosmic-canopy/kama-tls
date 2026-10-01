@@ -1,0 +1,9 @@
+# Build artifacts. Everything kama generates lands under one root — see `out` in kama.json. The test
+# certificates are generated under it too (tools/gen-certs.sh), so no key is ever tracked.
+out/
+
+# Resolved dependencies. Reproducible from kama.json + kama.lock, so they are not committed.
+.kama/
+
+# Per-machine manifest override (deep-merges over kama.json). Yours, not the project's.
+kama.local.json
