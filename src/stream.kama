@@ -31,6 +31,8 @@ extern fn int32 ktls_write(UnsafePtr s, UnsafeConstPtr<uint8> buf, usize len);
 extern fn int32 ktls_close_notify(UnsafePtr s);
 extern fn uint32 ktls_verify_flags(UnsafePtr s);
 extern fn usize ktls_verify_text(uint32 flags, UnsafePtr<uint8> buf, usize cap);
+extern fn int32 ktls_fatal_alert(UnsafePtr s);
+extern fn usize ktls_alert_name(int32 description, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_peer_cert(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_end_point(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_alpn(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
@@ -44,6 +46,7 @@ comptime int32 WANT_READ = -1;               // KTLS_WANT_READ
 comptime int32 CLOSED = -2;                  // KTLS_CLOSED: close_notify received
 comptime int32 TRUNCATED = -7;               // KTLS_TRUNCATED: the transport ended without close_notify
 comptime int32 CERT_VERIFY_FAILED = -9984;   // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED (-0x2700)
+comptime int32 FATAL_ALERT = -30592;         // MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE (-0x7780): the peer sent one
 // The transport is read and written in pieces of this size: one full TLS record and its overhead.
 comptime isize CHUNK = 17408;
 
@@ -265,8 +268,8 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         return IoError.of(kind: IoErrorKind::Other);
     }
 
-    // An engine failure as data: a rejected certificate says which checks failed; anything else says why, and
-    // whether the handshake had finished.
+    // An engine failure as data: a rejected certificate says which checks failed, a fatal alert from the peer
+    // names the alert; anything else says why, and whether the handshake had finished.
     unsafe fn TlsError explain(int32 code) {
         uint32 flags = ktls_verify_flags(s: this.session);
         if (code == CERT_VERIFY_FAILED && flags != 0ui32) {
@@ -274,6 +277,16 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
             isize n = cast<isize>(ktls_verify_text(flags: flags, buf: text.dataPtrMut(), cap: 1024));
             if (n > 1024) { n = 1024; }
             return TlsError::Certificate(flags: flags, reasons: kama_string_from_raw(src: text.dataPtr(), start: 0, len: n));
+        }
+        if (code == FATAL_ALERT) {
+            int32 alert = ktls_fatal_alert(s: this.session);
+            if (alert >= 0 && alert <= 255) {
+                FixedArray<uint8> name = FixedArray.make(size: 64);
+                isize n = cast<isize>(ktls_alert_name(description: alert, buf: name.dataPtrMut(), cap: 64));
+                if (n > 64) { n = 64; }
+                return TlsError::Alert(description: cast<uint8>(alert), name: kama_string_from_raw(src: name.dataPtr(), start: 0, len: n),
+                                       established: this.established);
+            }
         }
         if (this.established) { return TlsError::Session(code: code, detail: errorText(code: code)); }
         return TlsError::Handshake(code: code, detail: errorText(code: code));

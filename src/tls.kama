@@ -35,11 +35,15 @@ type enum TlsError implements Error {
     // The peer's certificate did not verify. `flags` are Mbed TLS's MBEDTLS_X509_BADCERT_* bits; `reasons`
     // says which in words ("The certificate validity has expired; …").
     Certificate(uint32 flags, string reasons),
-    // The handshake failed for any other reason: no common version or cipher, an alert from the peer, a
-    // malformed message.
+    // The handshake failed for any other reason: no common version or cipher, a malformed message.
     Handshake(int32 code, string detail),
-    // The session failed after its handshake: an alert from the peer, a record that did not authenticate.
+    // The session failed after its handshake: a record that did not authenticate.
     Session(int32 code, string detail),
+    // The peer ended the session with a fatal alert. `description` is the alert's number (RFC 8446 §6: 48
+    // unknown_ca, 116 certificate_required, …) and `name` its RFC name. `established` says whether the handshake
+    // had finished: under TLS 1.3 a server that refuses the client's certificate says so after the client's
+    // handshake is done, on its first read.
+    Alert(uint8 description, string name, bool established),
     // The transport under the session failed.
     Io(IoError error),
     // The transport ended before the handshake finished.
@@ -52,10 +56,49 @@ type enum TlsError implements Error {
             case Certificate(flags: f, reasons: r): "the peer's certificate was rejected: ${r}";
             case Handshake(code: c, detail: d): "TLS handshake failed: ${d}";
             case Session(code: c, detail: d): "TLS session failed: ${d}";
+            case Alert(description: a, name: n, established: e): "the peer sent a fatal alert: ${n}";
             case Io(error: e): "TLS transport: ".concat(other: e.message());
             case Closed: "the connection closed during the TLS handshake";
         };
     }
+
+    // What failed, in words that read after a frame such as libpq's "SSL error: ": no prefix of its own, no
+    // module tag, a lower-case start. `message()` is the same thing as a sentence that stands alone.
+    public const fn string reason() {
+        return match (this) {
+            case CryptoInit(status: s): "the crypto core failed to initialise (psa_status_t ${s})";
+            case Config(code: c, detail: d): bare(text: d);
+            case Certificate(flags: f, reasons: r): "certificate verify failed: ".concat(other: r);
+            case Handshake(code: c, detail: d): bare(text: d);
+            case Session(code: c, detail: d): bare(text: d);
+            case Alert(description: a, name: n, established: e): "received fatal alert: ${n}";
+            case Io(error: e): e.message();
+            case Closed: "unexpected end of stream during the handshake";
+        };
+    }
+}
+
+// Mbed TLS's text without its module tag ("SSL - An invalid SSL record was received" → "an invalid SSL record was
+// received"). An initial capital is lowered only before a lower-case letter, so an acronym stays as it is.
+fn string bare(const ref string text) {
+    string body = copy text;
+    Optional<usize> dash = text.find(substring: " - ");
+    match (dash) {
+        case Some(value: at): {
+            isize from = cast<isize>(at) + 3;
+            if (at <= 12) { body = text.substring(start: from, end: text.length()); }
+        }
+        case None: { }
+    };
+    if (body.length() < 2) { return body; }
+    uint8 first = body[0];
+    uint8 second = body[1];
+    if (first >= 65ui8 && first <= 90ui8 && second >= 97ui8 && second <= 122ui8) {
+        string head = body.substring(start: 0, end: 1);
+        string rest = body.substring(start: 1, end: body.length());
+        return head.toLower().concat(other: rest);
+    }
+    return body;
 }
 
 // A protocol version, for `TlsConfig.versions` and `TlsStream.protocolVersion`.

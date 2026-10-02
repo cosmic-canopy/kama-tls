@@ -74,10 +74,19 @@ int32_t ktls_close_notify(ktls_session *s);                         /* queue clo
    Each text or byte answer is copied into the caller's buffer, truncated to cap; the return value is the
    FULL length, so a caller can size a buffer and ask again. */
 uint32_t ktls_verify_flags(const ktls_session *s);                 /* MBEDTLS_X509_BADCERT_* bits; 0 = verified */
+/* The reasons for `flags` in words, joined with "; ", each starting in lower case. */
 size_t ktls_verify_text(uint32_t flags, uint8_t *buf, size_t cap);
+/* Words for any code this package hands out: its own, Mbed TLS's, and the key/PEM/PSA codes Mbed TLS 4 has no
+   text for. */
 size_t ktls_error_text(int32_t code, uint8_t *buf, size_t cap);
+/* The description of the fatal alert the peer sent, after a step answered MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE;
+   -1 when none was received. */
+int32_t ktls_fatal_alert(const ktls_session *s);
+size_t ktls_alert_name(int32_t description, uint8_t *buf, size_t cap);   /* "unknown_ca", "certificate_required", … */
 size_t ktls_peer_cert(const ktls_session *s, uint8_t *buf, size_t cap);   /* DER; 0 when there is none */
-size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap);   /* RFC 5929 tls-server-end-point */
+/* RFC 5929 tls-server-end-point: MD5 and SHA-1 signatures hash with SHA-256, every other one with its own hash.
+   0 when there is no peer certificate, or its signature's hash is not one PostgreSQL would use either. */
+size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap);
 size_t ktls_alpn(const ktls_session *s, uint8_t *buf, size_t cap);        /* 0 when none was agreed */
 size_t ktls_ciphersuite(const ktls_session *s, uint8_t *buf, size_t cap);
 int32_t ktls_protocol(const ktls_session *s);                             /* 0x0303 / 0x0304; 0 before */

@@ -8,6 +8,13 @@ All notable changes to this package are recorded here. The format follows
 
 Needs **kama ≥ 0.9.519**.
 
+### Fixed
+- `tlsServerEndPoint()` follows RFC 5929 as PostgreSQL does: only an MD5 or SHA-1 signature hashes with SHA-256,
+  and a SHA-224 signature hashes with SHA-224 (it used SHA-256, so SCRAM-SHA-256-PLUS failed against such a
+  certificate). A signature hash outside MD5/SHA-1/SHA-2 gives no binding rather than a guess.
+- The verify reasons in `TlsError::Certificate` are joined with "; " as documented (it was ";"), and each starts in
+  lower case so the list reads inside a sentence.
+
 ### Changed
 - **Ported to kama 0.9.519**, where `std::io::IoError` is a kind plus the OS's code (`e.kind()`), not an enum.
   A read, write or flush that fails in the TLS engine answers `IoError.of(kind: IoErrorKind::Other)`, and the
@@ -18,6 +25,15 @@ Needs **kama ≥ 0.9.519**.
   Copyright is Cosmic Canopy LLC and the kama contributors. Mbed TLS stays Apache-2.0 OR GPL-2.0-or-later.
 
 ### Added
+- `TlsError::Alert(description, name, established)`: the peer ended the session with a fatal alert, by its RFC
+  number and name (48 `unknown_ca`, 70 `protocol_version`, 116 `certificate_required`, …), and whether the
+  handshake had finished. Before, an alert was a `Handshake` or `Session` error saying only "A fatal alert message
+  was received from our peer".
+- `TlsError.reason()`: the failure in words that read after a frame such as libpq's `SSL error: `, with no module
+  tag ("received fatal alert: unknown_ca", "certificate verify failed: the certificate validity has expired").
+- Words for the key, PEM and PSA failures Mbed TLS 4 prints as "UNKNOWN ERROR CODE": "the private key is
+  encrypted, and no password was given", "the password does not decrypt the private key", a PEM encrypted with a
+  cipher this build lacks (DES), and the rest of `MBEDTLS_ERR_PK_*` / `PEM_*`.
 - `TlsStream.tlsError()`: why the engine last failed, as a `TlsError`. A certificate rejected by a handshake that
   a read or write ran keeps its flags and reasons, which the old `Other(code)` dropped.
 - `TlsError::Session(code, detail)`: the session failed after its handshake (an alert, a record that did not

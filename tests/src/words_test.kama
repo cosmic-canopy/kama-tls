@@ -1,0 +1,208 @@
+// What a failure says: the verify reasons in words, a peer's fatal alert by number and name, key and password
+// failures in words rather than "UNKNOWN ERROR CODE", and the frame-ready `reason()`. And the RFC 5929 end-point
+// hash for each signature hash, against openssl's own (tools/gen-certs.sh writes it beside each certificate).
+import { core::println, std::io::IoError, std::collections::DynamicArray, std::collections::FixedArray, std::fs::readText,
+         tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
+         tls_tests::check, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig,
+         tls_tests::connect, tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session,
+         tls_tests::Outcome };
+export { wordsTests, hex, keyPassword };
+
+// The password tools/gen-certs.sh encrypts client-pkcs8.key and client-trad.key with.
+fn string keyPassword() { return "kama-tls test key pw"; }
+
+fn string hex(const ref DynamicArray<uint8> bytes) {
+    string digits = "0123456789abcdef";
+    string text = "";
+    isize i = 0;
+    while (i < bytes.length()) {
+        isize hi = cast<isize>(bytes[i] >> 4);
+        isize lo = cast<isize>(bytes[i] & 15ui8);
+        text = text.concat(other: digits.substring(start: hi, end: hi + 1)).concat(other: digits.substring(start: lo, end: lo + 1));
+        i = i + 1;
+    }
+    return text;
+}
+
+fn TlsConfig must(Result<TlsConfig, TlsError> made, const ref string what) {
+    return match (give made) { case Ok(value: c): give c; case Err(error: e): { string m = e.message(); panic(msg: "${what}: ${m}"); return must(made: TlsConfig.client(), what: what); } };
+}
+
+// Two reasons at once (an expired certificate from a CA the client does not trust): joined with "; ", each
+// starting in lower case, so the list reads inside libpq's "SSL error: certificate verify failed: …".
+fn int32 separatorTests() {
+    int32 f = 0;
+    string other = "other-ca.crt";
+    string expCrt = "expired.crt"; string expKey = "expired.key";
+    string localhost = "localhost";
+    TlsConfig client = must(made: clientConfig(mode: Verify::Full, caName: other), what: "client");
+    TlsConfig server = must(made: serverConfig(certName: expCrt, keyName: expKey), what: "server");
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "words: session"); } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    match (give o) {
+        case ClientFailed(error: e): {
+            match (e) {
+                case Certificate(flags: fl, reasons: r): {
+                    bool joined = r.contains(substring: "; ") && !r.contains(substring: ";T") && !r.contains(substring: ";t");
+                    f = f + check(ok: joined, what: "words: verify reasons are joined with \"; \" (".concat(other: r).concat(other: ")"));
+                    f = f + check(ok: r.startsWith(prefix: "the certificate"), what: "words: each reason starts in lower case (".concat(other: r).concat(other: ")"));
+                    string why = e.reason();
+                    f = f + check(ok: why.startsWith(prefix: "certificate verify failed: the certificate"), what: "words: reason() frames a rejection (".concat(other: why).concat(other: ")"));
+                }
+                case _: { f = f + check(ok: false, what: "words: an expired, untrusted certificate is a Certificate error (".concat(other: e.message()).concat(other: ")")); }
+            };
+        }
+        case _: { f = f + check(ok: false, what: "words: the client rejects an expired, untrusted certificate"); }
+    };
+    return f;
+}
+
+fn bool isAlert(const ref TlsError e, uint8 description, bool established) {
+    return match (e) { case Alert(description: d, name: n, established: x): d == description && x == established; case _: false; };
+}
+
+// A peer's fatal alert, by number. Mbed TLS as the SERVER limits what can be provoked here: under TLS 1.3 it
+// sends a client-authentication alert under its handshake keys, which a client that has already switched to the
+// application keys cannot read (OpenSSL, PostgreSQL's library, switches at its own Finished, so a real server's
+// alert arrives on the client's first read); and under TLS 1.2 it sends no alert for a missing certificate. So
+// the alerts are provoked where it does send one: a client certificate from a CA the server does not trust,
+// under TLS 1.2, and no version in common.
+fn int32 alertTests() {
+    int32 f = 0;
+    string ca = "ca.crt";
+    string other = "other-ca.crt";
+    string otherPath = certPath(name: other);
+    string srvCrt = "server.crt"; string srvKey = "server.key";
+    string localhost = "localhost";
+    string crt = certPath(name: "client.crt");
+    string key = certPath(name: "client.key");
+    string nopw = "";
+
+    // TLS 1.3, no client certificate: the client's handshake completes, and its first read fails.
+    TlsConfig s13 = must(made: serverConfig(certName: srvCrt, keyName: srvKey), what: "server");
+    Result<Unit, TlsError> v13 = s13.verify(mode: Verify::Chain);
+    Result<Unit, TlsError> t13 = s13.trustFile(path: certPath(name: ca));
+    TlsConfig c13 = must(made: clientConfig(mode: Verify::Full, caName: ca), what: "client");
+    Result<Session, TlsError> m13 = connect(client: c13, server: s13, name: localhost);
+    Session p13 = match (give m13) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "alert: session"); } };
+    Outcome o13 = drive(c: p13.c(), s: p13.s());
+    bool serverRefused = match (o13) { case ServerFailed(error: e): true; case _: false; };
+    f = f + check(ok: serverRefused, what: "alert: TLS 1.3, the server refuses a client with no certificate (".concat(other: describe(o: o13)).concat(other: ")"));
+    FixedArray<uint8> buf = FixedArray.make(size: 64);
+    Result<isize, IoError> r = p13.c().read(into: buf.viewMut());
+    bool failed = match (r) { case Err(error: e): true; case Ok(value: n): false; };
+    f = f + check(ok: failed, what: "alert: TLS 1.3, the refused client's first read fails");
+
+    // TLS 1.2, a client certificate the server cannot chain: unknown_ca, during the client's handshake.
+    TlsConfig s12 = must(made: serverConfig(certName: srvCrt, keyName: srvKey), what: "server");
+    Result<Unit, TlsError> v12 = s12.verify(mode: Verify::Chain);
+    Result<Unit, TlsError> t12 = s12.trustFile(path: otherPath);
+    TlsConfig c12 = must(made: clientConfig(mode: Verify::Full, caName: ca), what: "client");
+    Result<Unit, TlsError> pin = c12.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12);
+    Result<Unit, TlsError> id = c12.identityFiles(certificate: crt, key: key, password: nopw);
+    Result<Session, TlsError> m12 = connect(client: c12, server: s12, name: localhost);
+    Session p12 = match (give m12) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "alert: session"); } };
+    Outcome o12 = drive(c: p12.c(), s: p12.s());
+    Result<Progress, TlsError> after = p12.c().handshake();
+    match (give after) {
+        case Err(error: e): {
+            f = f + check(ok: isAlert(e: e, description: 48ui8, established: false),
+                          what: "alert: TLS 1.2, unknown_ca (48) ends the client's handshake (".concat(other: e.message()).concat(other: ")"));
+            string why = e.reason();
+            f = f + check(ok: why.equals(other: "received fatal alert: unknown_ca"), what: "alert: reason() names it (".concat(other: why).concat(other: ")"));
+        }
+        case Ok(value: p): { f = f + check(ok: false, what: "alert: TLS 1.2, the client's handshake fails (".concat(other: describe(o: o12)).concat(other: ")")); }
+    };
+
+    // No version in common: a TLS 1.3-only server and a TLS 1.2-only client.
+    TlsConfig s3 = must(made: serverConfig(certName: srvCrt, keyName: srvKey), what: "server");
+    Result<Unit, TlsError> only13 = s3.versions(min: TlsVersion::Tls13, max: TlsVersion::Tls13);
+    TlsConfig c2 = must(made: clientConfig(mode: Verify::Full, caName: ca), what: "client");
+    Result<Unit, TlsError> only12 = c2.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12);
+    Result<Session, TlsError> mv = connect(client: c2, server: s3, name: localhost);
+    Session pv = match (give mv) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "alert: session"); } };
+    Outcome ov = drive(c: pv.c(), s: pv.s());
+    Result<Progress, TlsError> again = pv.c().handshake();
+    match (give again) {
+        case Err(error: e): { f = f + check(ok: isAlert(e: e, description: 70ui8, established: false), what: "alert: no common version is protocol_version (70) (".concat(other: e.message()).concat(other: ")")); }
+        case Ok(value: p): { f = f + check(ok: false, what: "alert: no common version fails (".concat(other: describe(o: ov)).concat(other: ")")); }
+    };
+    return f;
+}
+
+// An encrypted key without its password, with the wrong one, and with the right one, as PKCS#8 and as a
+// traditional PEM. Each failure is a sentence, not a code.
+fn int32 keyWordTests() {
+    int32 f = 0;
+    string crt = certPath(name: "client.crt");
+    DynamicArray<string> keys = DynamicArray.empty();
+    keys.add(item: "client-pkcs8.key");
+    keys.add(item: "client-trad.key");
+    foreach (string name in keys) {
+        string key = certPath(name: name);
+        DynamicArray<string> passwords = DynamicArray.empty();
+        passwords.add(item: "");
+        passwords.add(item: "not the password");
+        passwords.add(item: keyPassword());
+        DynamicArray<string> wants = DynamicArray.empty();
+        wants.add(item: "the private key is encrypted, and no password was given");
+        wants.add(item: "the password does not decrypt the private key");
+        wants.add(item: "");
+        isize i = 0;
+        while (i < passwords.length()) {
+            TlsConfig c = must(made: TlsConfig.client(), what: "client");
+            Result<Unit, TlsError> id = c.identityFiles(certificate: crt, key: key, password: passwords[i]);
+            string got = "";
+            match (give id) {
+                case Ok(value: u): { }
+                case Err(error: e): {
+                    string said = match (give e) { case Config(code: k, detail: d): give d; case _: "not a Config error"; };
+                    got = give said;
+                }
+            };
+            string want = copy wants[i];
+            f = f + check(ok: got.equals(other: want), what: "words: ".concat(other: name).concat(other: " password case ${i}: \"").concat(other: got).concat(other: "\""));
+            i = i + 1;
+        }
+    }
+    return f;
+}
+
+// tls-server-end-point for a certificate signed with each hash: SHA-224 and SHA-384 are used as they are, and
+// SHA-1 becomes SHA-256, as openssl computed it.
+fn int32 endPointTests() {
+    int32 f = 0;
+    string localhost = "localhost";
+    string none = "";
+    DynamicArray<string> mds = DynamicArray.empty();
+    mds.add(item: "sha224");
+    mds.add(item: "sha384");
+    mds.add(item: "sha1");
+    foreach (string md in mds) {
+        string crt = "server-".concat(other: md).concat(other: ".crt");
+        string key = "server-".concat(other: md).concat(other: ".key");
+        string file = "server-".concat(other: md).concat(other: ".endpoint");
+        Result<string, IoError> expected = readText(path: certPath(name: file));
+        string want = match (give expected) { case Ok(value: t): t.trim(); case Err(error: e): { return check(ok: false, what: "end-point: read ".concat(other: file)); } };
+        TlsConfig client = must(made: clientConfig(mode: Verify::None, caName: none), what: "client");
+        TlsConfig server = must(made: serverConfig(certName: crt, keyName: key), what: "server");
+        Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+        Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "end-point: session"); } };
+        Outcome o = drive(c: pair.c(), s: pair.s());
+        f = f + check(ok: completed(o: o), what: "end-point: a ".concat(other: md).concat(other: "-signed server (").concat(other: describe(o: o)).concat(other: ")"));
+        DynamicArray<uint8> got = pair.c().tlsServerEndPoint();
+        string gotHex = hex(bytes: got);
+        f = f + check(ok: gotHex.equals(other: want), what: "end-point: ".concat(other: md).concat(other: " gives openssl's hash (").concat(other: gotHex).concat(other: ")"));
+    }
+    return f;
+}
+
+fn int32 wordsTests() {
+    int32 f = 0;
+    f = f + separatorTests();
+    f = f + alertTests();
+    f = f + keyWordTests();
+    f = f + endPointTests();
+    return f;
+}

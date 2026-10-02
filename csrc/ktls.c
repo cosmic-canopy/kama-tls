@@ -12,6 +12,8 @@
 #include <string.h>
 
 #include <mbedtls/error.h>
+#include <mbedtls/md.h>
+#include <mbedtls/pem.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/platform_util.h>
 #include <mbedtls/ssl.h>
@@ -402,10 +404,71 @@ size_t ktls_verify_text(uint32_t flags, uint8_t *buf, size_t cap)
     char text[1024];
     int n = mbedtls_x509_crt_verify_info(text, sizeof text, "", flags);
     if (n < 0) n = 0;
-    /* One reason per line, each ending in '\n'; turn the separators into "; " and drop the last. */
-    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == ' ')) n--;
-    for (int i = 0; i < n; i++) if (text[i] == '\n') text[i] = ';';
-    return ktls_copy_out(text, (size_t)n, buf, cap);
+    /* One reason per line, each ending in '\n'. They are joined with "; ", and each starts in lower case so the
+       list reads inside a sentence ("certificate verify failed: the certificate validity has expired; …"). A
+       reason that opens with an acronym ("CRL …") keeps it. */
+    char joined[1200];
+    size_t out = 0;
+    int line_start = 1;
+    for (int i = 0; i < n && out + 2 < sizeof joined; i++) {
+        char ch = text[i];
+        if (ch == '\n') {
+            while (out > 0 && joined[out - 1] == ' ') out--;
+            if (i + 1 < n) { joined[out++] = ';'; joined[out++] = ' '; }
+            line_start = 1;
+            continue;
+        }
+        if (line_start && ch == ' ') continue;
+        if (line_start && ch >= 'A' && ch <= 'Z' && i + 1 < n && text[i + 1] >= 'a' && text[i + 1] <= 'z') ch = (char)(ch - 'A' + 'a');
+        line_start = 0;
+        joined[out++] = ch;
+    }
+    while (out > 0 && (joined[out - 1] == ' ' || joined[out - 1] == ';')) out--;
+    return ktls_copy_out(joined, out, buf, cap);
+}
+
+/* Words for the key and PEM failures Mbed TLS 4's mbedtls_strerror has no text for (it prints "UNKNOWN ERROR CODE
+   (3C00)"), and for the PSA status codes the key and certificate parsers now return. NULL when this table has
+   nothing to say, so the caller falls back to mbedtls_strerror. */
+static const char *ktls_known_text(int32_t code)
+{
+    if (code <= -0x1000) {
+        int32_t high = -((-code) & 0xFF80);
+        switch (high) {
+            case MBEDTLS_ERR_PK_TYPE_MISMATCH:       return "the key is not of the type this operation needs";
+            case MBEDTLS_ERR_PK_FILE_IO_ERROR:       return "the key file could not be read";
+            case MBEDTLS_ERR_PK_KEY_INVALID_VERSION: return "the key's format version is not supported";
+            case MBEDTLS_ERR_PK_KEY_INVALID_FORMAT:  return "the data is not a private key in a format this library reads";
+            case MBEDTLS_ERR_PK_UNKNOWN_PK_ALG:      return "the key's algorithm is not supported";
+            case MBEDTLS_ERR_PK_PASSWORD_REQUIRED:   return "the private key is encrypted, and no password was given";
+            case MBEDTLS_ERR_PK_PASSWORD_MISMATCH:   return "the password does not decrypt the private key";
+            case MBEDTLS_ERR_PK_INVALID_PUBKEY:      return "the public key is invalid";
+            case MBEDTLS_ERR_PK_INVALID_ALG:         return "the key's algorithm identifier is invalid";
+            case MBEDTLS_ERR_PK_UNKNOWN_NAMED_CURVE: return "the key's elliptic curve is not supported";
+            case MBEDTLS_ERR_PK_FEATURE_UNAVAILABLE: return "the key needs a feature this build of Mbed TLS leaves out";
+            case MBEDTLS_ERR_PEM_NO_HEADER_FOOTER_PRESENT: return "no PEM header and footer were found";
+            case MBEDTLS_ERR_PEM_INVALID_DATA:       return "the PEM data is malformed";
+            case MBEDTLS_ERR_PEM_INVALID_ENC_IV:     return "the PEM encryption IV is invalid";
+            case MBEDTLS_ERR_PEM_UNKNOWN_ENC_ALG:    return "the PEM is encrypted with a cipher this library does not have (DES is not supported)";
+            case MBEDTLS_ERR_PEM_PASSWORD_REQUIRED:  return "the private key is encrypted, and no password was given";
+            case MBEDTLS_ERR_PEM_PASSWORD_MISMATCH:  return "the password does not decrypt the private key";
+            case MBEDTLS_ERR_PEM_FEATURE_UNAVAILABLE: return "the PEM needs a feature this build of Mbed TLS leaves out";
+            default: return NULL;
+        }
+    }
+    switch (code) {
+        case PSA_ERROR_INVALID_ARGUMENT:     return "invalid input data";
+        case PSA_ERROR_INSUFFICIENT_MEMORY:  return "out of memory";
+        case PSA_ERROR_BUFFER_TOO_SMALL:     return "a buffer is too small";
+        case PSA_ERROR_NOT_SUPPORTED:        return "not supported by this build of Mbed TLS";
+        case PSA_ERROR_NOT_PERMITTED:        return "the key does not permit this operation";
+        case PSA_ERROR_INVALID_SIGNATURE:    return "a signature does not verify";
+        case PSA_ERROR_INVALID_PADDING:      return "invalid padding";
+        case PSA_ERROR_INSUFFICIENT_ENTROPY: return "not enough entropy";
+        case PSA_ERROR_CORRUPTION_DETECTED:  return "memory corruption detected";
+        case PSA_ERROR_GENERIC_ERROR:        return "a cryptographic operation failed";
+        default: return NULL;
+    }
 }
 
 size_t ktls_error_text(int32_t code, uint8_t *buf, size_t cap)
@@ -423,9 +486,61 @@ size_t ktls_error_text(int32_t code, uint8_t *buf, size_t cap)
         case KTLS_TRUNCATED:   return ktls_copy_out(truncated, sizeof truncated - 1, buf, cap);
         default: break;
     }
+    const char *known = ktls_known_text(code);
+    if (known != NULL) return ktls_copy_out(known, strlen(known), buf, cap);
     char text[256];
     mbedtls_strerror(code, text, sizeof text);
     return ktls_copy_out(text, strlen(text), buf, cap);
+}
+
+int32_t ktls_fatal_alert(const ktls_session *s)
+{
+    int rc = mbedtls_ssl_get_fatal_alert(&s->ssl);
+    return rc < 0 ? -1 : (int32_t)rc;
+}
+
+/* The alert's name as RFC 8446 §6 (and RFC 5246 for the ones TLS 1.3 retired) spells it. */
+size_t ktls_alert_name(int32_t description, uint8_t *buf, size_t cap)
+{
+    const char *name;
+    switch (description) {
+        case 0:   name = "close_notify"; break;
+        case 10:  name = "unexpected_message"; break;
+        case 20:  name = "bad_record_mac"; break;
+        case 21:  name = "decryption_failed"; break;
+        case 22:  name = "record_overflow"; break;
+        case 30:  name = "decompression_failure"; break;
+        case 40:  name = "handshake_failure"; break;
+        case 41:  name = "no_certificate"; break;
+        case 42:  name = "bad_certificate"; break;
+        case 43:  name = "unsupported_certificate"; break;
+        case 44:  name = "certificate_revoked"; break;
+        case 45:  name = "certificate_expired"; break;
+        case 46:  name = "certificate_unknown"; break;
+        case 47:  name = "illegal_parameter"; break;
+        case 48:  name = "unknown_ca"; break;
+        case 49:  name = "access_denied"; break;
+        case 50:  name = "decode_error"; break;
+        case 51:  name = "decrypt_error"; break;
+        case 60:  name = "export_restriction"; break;
+        case 70:  name = "protocol_version"; break;
+        case 71:  name = "insufficient_security"; break;
+        case 80:  name = "internal_error"; break;
+        case 86:  name = "inappropriate_fallback"; break;
+        case 90:  name = "user_canceled"; break;
+        case 100: name = "no_renegotiation"; break;
+        case 109: name = "missing_extension"; break;
+        case 110: name = "unsupported_extension"; break;
+        case 111: name = "certificate_unobtainable"; break;
+        case 112: name = "unrecognized_name"; break;
+        case 113: name = "bad_certificate_status_response"; break;
+        case 114: name = "bad_certificate_hash_value"; break;
+        case 115: name = "unknown_psk_identity"; break;
+        case 116: name = "certificate_required"; break;
+        case 120: name = "no_application_protocol"; break;
+        default:  name = "unknown alert"; break;
+    }
+    return ktls_copy_out(name, strlen(name), buf, cap);
 }
 
 size_t ktls_peer_cert(const ktls_session *s, uint8_t *buf, size_t cap)
@@ -435,22 +550,32 @@ size_t ktls_peer_cert(const ktls_session *s, uint8_t *buf, size_t cap)
     return ktls_copy_out(crt->raw.p, crt->raw.len, buf, cap);
 }
 
-/* RFC 5929 §4.1: the hash of the server certificate's DER, with the hash function of its signature
-   algorithm — except that MD5 and SHA-1 become SHA-256. What SCRAM-SHA-256-PLUS binds a login to. */
-size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap)
+/* RFC 5929 §4.1: the hash of the certificate's DER, with the hash function of its signature algorithm — except
+   that MD5 and SHA-1 become SHA-256. What SCRAM-SHA-256-PLUS binds a login to, as PostgreSQL computes it
+   (be_tls_get_certificate_hash): a SHA-224 signature hashes with SHA-224, and a signature whose hash is not one
+   of these has no binding at all (0), rather than a guess the server would not share. */
+static size_t ktls_end_point_of(const mbedtls_x509_crt *crt, uint8_t *buf, size_t cap)
 {
-    const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&s->ssl);
     if (crt == NULL) return 0;
     psa_algorithm_t alg;
     switch (crt->sig_md) {
+        case MBEDTLS_MD_MD5:
+        case MBEDTLS_MD_SHA1:
+        case MBEDTLS_MD_SHA256: alg = PSA_ALG_SHA_256; break;
+        case MBEDTLS_MD_SHA224: alg = PSA_ALG_SHA_224; break;
         case MBEDTLS_MD_SHA384: alg = PSA_ALG_SHA_384; break;
         case MBEDTLS_MD_SHA512: alg = PSA_ALG_SHA_512; break;
-        default:                alg = PSA_ALG_SHA_256; break;   /* SHA-256, SHA-224, SHA-1, MD5 */
+        default:                return 0;
     }
     uint8_t hash[PSA_HASH_MAX_SIZE];
     size_t len = 0;
     if (psa_hash_compute(alg, crt->raw.p, crt->raw.len, hash, sizeof hash, &len) != PSA_SUCCESS) return 0;
     return ktls_copy_out(hash, len, buf, cap);
+}
+
+size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap)
+{
+    return ktls_end_point_of(mbedtls_ssl_get_peer_cert(&s->ssl), buf, cap);
 }
 
 size_t ktls_alpn(const ktls_session *s, uint8_t *buf, size_t cap)
@@ -475,5 +600,6 @@ int32_t ktls_protocol(const ktls_session *s)
    one fails to compile with the name, rather than misreading an error at run time. */
 _Static_assert(KTLS_WANT_READ == -1 && KTLS_CLOSED == -2 && KTLS_TRUNCATED == -7, "stream.kama WANT_READ / CLOSED / TRUNCATED");
 _Static_assert(MBEDTLS_ERR_X509_CERT_VERIFY_FAILED == -9984, "stream.kama CERT_VERIFY_FAILED");
+_Static_assert(MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE == -30592, "stream.kama FATAL_ALERT");
 _Static_assert(MBEDTLS_SSL_VERSION_TLS1_2 == 771 && MBEDTLS_SSL_VERSION_TLS1_3 == 772, "TLS version numbers");
 _Static_assert(KTLS_ERR_NOMEM == -3 && KTLS_ERR_INPUT == -5, "config.kama error codes");
