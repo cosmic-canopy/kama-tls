@@ -53,8 +53,10 @@ int32_t ktls_config_trust_count(const ktls_config *c);                          
 /* ---- session ------------------------------------------------------------------------------------------ */
 typedef struct ktls_session ktls_session;
 
-/* A client or a server session; retains the configuration. A client that verifies the name needs
-   `server_name`; it is also sent as SNI unless it is an IP address. NULL on failure, the reason in *err. */
+/* A client or a server session; retains the configuration. A client's `server_name` is sent as SNI, whatever
+   it holds (an IP address too: Mbed TLS does not tell them apart), and full verification compares the
+   certificate with it, so full verification needs one. Under chain-only or no verification it may be empty or
+   NULL: no SNI is sent and no name is compared. NULL on failure, the reason in *err. */
 ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t *err);
 void ktls_session_free(ktls_session *s);
 
@@ -87,8 +89,21 @@ size_t ktls_peer_cert(const ktls_session *s, uint8_t *buf, size_t cap);   /* DER
 /* RFC 5929 tls-server-end-point: MD5 and SHA-1 signatures hash with SHA-256, every other one with its own hash.
    0 when there is no peer certificate, or its signature's hash is not one PostgreSQL would use either. */
 size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap);
+/* The peer certificate's names, as records of [kind u8][length u16 big-endian][raw bytes]: subjectAltName dNSName
+   (1) and iPAddress (2) entries in certificate order, then every subject commonName (3). 0 when there is none. */
+size_t ktls_peer_names(const ktls_session *s, uint8_t *buf, size_t cap);
 size_t ktls_alpn(const ktls_session *s, uint8_t *buf, size_t cap);        /* 0 when none was agreed */
 size_t ktls_ciphersuite(const ktls_session *s, uint8_t *buf, size_t cap);
 int32_t ktls_protocol(const ktls_session *s);                             /* 0x0303 / 0x0304; 0 before */
+
+/* ---- a certificate on its own ----------------------------------------------------------------------------
+   Parsed from PEM (the first certificate of a bundle) or DER, with no session: its DER, its names (as
+   ktls_peer_names gives them) and its RFC 5929 end-point hash. NULL on failure, the reason in *err. */
+typedef struct ktls_cert ktls_cert;
+ktls_cert *ktls_cert_parse(const uint8_t *data, size_t len, int32_t *err);
+void ktls_cert_free(ktls_cert *c);
+size_t ktls_cert_der(const ktls_cert *c, uint8_t *buf, size_t cap);
+size_t ktls_cert_names(const ktls_cert *c, uint8_t *buf, size_t cap);
+size_t ktls_cert_end_point(const ktls_cert *c, uint8_t *buf, size_t cap);
 
 #endif

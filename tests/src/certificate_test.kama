@@ -1,0 +1,153 @@
+// A certificate on its own, and the names a peer's certificate carries. The fixtures' names are the ones
+// tools/gen-certs.sh gives them (server: SAN DNS:localhost, IP:127.0.0.1, IP:::1, CN localhost; wronghost: SAN
+// DNS:wrong.example, CN wrong.example; client: no SAN, CN tls-client), and a DER is checked against the PEM's own
+// base64, decoded by the test rather than the code under test.
+import { std::io::IoError, std::collections::DynamicArray, std::collections::ConstView, std::fs::readText,
+         std::encoding::utf8::decode as utf8Decode, std::encoding::utf8::Utf8Error,
+         tls::Certificate, tls::CertificateNames, tls::NameKind, tls::TlsConfig, tls::TlsError, tls::Verify,
+         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome,
+         tls_tests::pemBody, tls_tests::sameBytes, tls_tests::hex };
+export { certificateTests };
+
+fn int32 kindCode(NameKind k) { return match (k) { case DnsName: 1; case IpAddress: 2; case CommonName: 3; }; }
+
+// The names as one line, e.g. "dns:localhost ip:7f000001 cn:localhost", so a mismatch shows what was there.
+fn string render(const ref CertificateNames names) {
+    string line = "";
+    isize i = 0;
+    while (i < names.count()) {
+        if (i > 0) { line = line.concat(other: " "); }
+        int32 k = kindCode(k: names.kindAt(index: i));
+        if (k == 2) { line = line.concat(other: "ip:").concat(other: hex(bytes: names.valueAt(index: i))); }
+        else {
+            string tag = "cn:";
+            if (k == 1) { tag = "dns:"; }
+            Result<string, Utf8Error> text = utf8Decode(bytes: names.valueAt(index: i).view());
+            string shown = match (give text) { case Ok(value: t): give t; case Err(error: e): "<not UTF-8>"; };
+            line = line.concat(other: tag).concat(other: shown);
+        }
+        i = i + 1;
+    }
+    return line;
+}
+
+fn Result<Certificate, TlsError> parseFile(const ref string name) {
+    Result<string, IoError> text = readText(path: certPath(name: name));
+    string pem = match (give text) { case Ok(value: t): give t; case Err(error: e): { return Result::Err(error: TlsError::Io(error: e)); } };
+    return Certificate.parse(bytes: pem.bytes());
+}
+
+fn int32 namesTests() {
+    int32 f = 0;
+    DynamicArray<string> files = DynamicArray.empty();
+    DynamicArray<string> wants = DynamicArray.empty();
+    files.add(item: "server.crt");    wants.add(item: "dns:localhost ip:7f000001 ip:00000000000000000000000000000001 cn:localhost");
+    files.add(item: "wronghost.crt"); wants.add(item: "dns:wrong.example cn:wrong.example");
+    files.add(item: "client.crt");    wants.add(item: "cn:tls-client");
+    isize i = 0;
+    while (i < files.length()) {
+        Result<Certificate, TlsError> parsed = parseFile(name: files[i]);
+        match (give parsed) {
+            case Ok(value: c): {
+                CertificateNames names = c.names();
+                string got = render(names: names);
+                f = f + check(ok: got.equals(other: wants[i]), what: "names: ".concat(other: files[i]).concat(other: " (").concat(other: got).concat(other: ")"));
+            }
+            case Err(error: e): { f = f + check(ok: false, what: "names: parse ".concat(other: files[i]).concat(other: " (").concat(other: e.message()).concat(other: ")")); }
+        };
+        i = i + 1;
+    }
+    return f;
+}
+
+// PEM in, DER out, and DER in again: the same certificate, the same names.
+fn int32 derTests() {
+    int32 f = 0;
+    DynamicArray<uint8> want = pemBody(path: certPath(name: "server.crt"));
+    Result<Certificate, TlsError> fromPem = parseFile(name: "server.crt");
+    match (give fromPem) {
+        case Ok(value: c): {
+            DynamicArray<uint8> der = c.der();
+            f = f + check(ok: sameBytes(a: der.view(), b: want.view()), what: "der: a PEM certificate's DER is its base64 body");
+            Result<Certificate, TlsError> fromDer = Certificate.parse(bytes: der.view());
+            match (give fromDer) {
+                case Ok(value: d): {
+                    CertificateNames a = c.names();
+                    CertificateNames b = d.names();
+                    string ra = render(names: a);
+                    string rb = render(names: b);
+                    f = f + check(ok: ra.equals(other: rb), what: "der: DER parses to the same names (".concat(other: rb).concat(other: ")"));
+                }
+                case Err(error: e): { f = f + check(ok: false, what: "der: DER parses (".concat(other: e.message()).concat(other: ")")); }
+            };
+        }
+        case Err(error: e): { f = f + check(ok: false, what: "der: parse server.crt"); }
+    };
+    string junk = "not a certificate";
+    Result<Certificate, TlsError> bad = Certificate.parse(bytes: junk.bytes());
+    bool refused = match (give bad) { case Ok(value: c): false; case Err(error: e): match (e) { case Config(code: k, detail: d): k < 0; case _: false; }; };
+    f = f + check(ok: refused, what: "der: bytes that are no certificate are a Config error");
+    string truncatedPem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+    Result<Certificate, TlsError> cut = Certificate.parse(bytes: truncatedPem.bytes());
+    bool cutRefused = match (give cut) { case Ok(value: c): false; case Err(error: e): true; };
+    f = f + check(ok: cutRefused, what: "der: a PEM block that is no certificate is refused");
+    return f;
+}
+
+// A parsed certificate's end-point hash matches openssl's, as the session's does.
+fn int32 endPointTests() {
+    int32 f = 0;
+    DynamicArray<string> mds = DynamicArray.empty();
+    mds.add(item: "sha224");
+    mds.add(item: "sha384");
+    mds.add(item: "sha1");
+    foreach (string md in mds) {
+        string crt = "server-".concat(other: md).concat(other: ".crt");
+        string file = "server-".concat(other: md).concat(other: ".endpoint");
+        Result<string, IoError> expected = readText(path: certPath(name: file));
+        string want = match (give expected) { case Ok(value: t): t.trim(); case Err(error: e): { return check(ok: false, what: "end-point: read ".concat(other: file)); } };
+        Result<Certificate, TlsError> parsed = parseFile(name: crt);
+        match (give parsed) {
+            case Ok(value: c): {
+                DynamicArray<uint8> got = c.tlsServerEndPoint();
+                string gotHex = hex(bytes: got);
+                f = f + check(ok: gotHex.equals(other: want), what: "certificate end-point: ".concat(other: md).concat(other: " (").concat(other: gotHex).concat(other: ")"));
+            }
+            case Err(error: e): { f = f + check(ok: false, what: "certificate end-point: parse ".concat(other: crt)); }
+        };
+    }
+    return f;
+}
+
+// The names a session's peer presented are the names of its certificate file.
+fn int32 peerNamesTests() {
+    int32 f = 0;
+    string ca = "ca.crt";
+    string none = "";
+    string srvCrt = "server.crt"; string srvKey = "server.key";
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Chain, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "peer names: client config"); } };
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: srvCrt, keyName: srvKey);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "peer names: server config"); } };
+    Result<Session, TlsError> made = connect(client: client, server: server, name: none);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "peer names: session"); } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    f = f + check(ok: completed(o: o), what: "peer names: handshake (".concat(other: describe(o: o)).concat(other: ")"));
+    CertificateNames peer = pair.c().peerNames();
+    string got = render(names: peer);
+    f = f + check(ok: got.equals(other: "dns:localhost ip:7f000001 ip:00000000000000000000000000000001 cn:localhost"),
+                  what: "peer names: the server's certificate (".concat(other: got).concat(other: ")"));
+    CertificateNames clientSide = pair.s().peerNames();
+    f = f + check(ok: clientSide.count() == 0, what: "peer names: none when the peer sent no certificate");
+    return f;
+}
+
+fn int32 certificateTests() {
+    int32 f = 0;
+    f = f + namesTests();
+    f = f + derTests();
+    f = f + endPointTests();
+    f = f + peerNamesTests();
+    return f;
+}

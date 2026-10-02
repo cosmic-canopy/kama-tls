@@ -8,7 +8,7 @@ import { core::println, std::io::IoError, std::io::IoErrorKind, std::io::writeAl
          tls_tests::check, tls_tests::BADCERT_CN_MISMATCH, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig,
          tls_tests::clientConfig, tls_tests::connect, tls_tests::drive, tls_tests::completed,
          tls_tests::describe, tls_tests::carries, tls_tests::Session, tls_tests::Outcome };
-export { streamTests };
+export { streamTests, pemBody, sameBytes };
 
 // A connected, handshaken session between a Full-verifying client trusting the test CA and a server
 // presenting server.crt — or a setup failure, as a named check.

@@ -39,9 +39,11 @@ published until postgres has exercised its API, because a registry version is pe
   and `MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY` for an orderly end. `ktls_read` turns those into `KTLS_TRUNCATED`
   (→ an `UnexpectedEof` IoError) and `KTLS_CLOSED` (→ 0 bytes). Getting this backwards silently turns a
   truncation into a clean EOF; the truncation test guards it.
-- **Mbed TLS 4 refuses a verifying client with no hostname.** Chain-only verification (`Verify::Chain`, libpq's
-  verify-ca) therefore still sets the name, for SNI, and a verify callback clears only the leaf's
-  CN-mismatch flag.
+- **Mbed TLS 4 refuses a verifying client whose hostname was never set, but an explicit
+  `mbedtls_ssl_set_hostname(NULL)` means "verify without a name".** So `Verify::Chain` (libpq's verify-ca) takes
+  an empty server name: no SNI, no name compared. Given a name, it sends SNI, and a verify callback clears only
+  the leaf's CN-mismatch flag. Mbed TLS sends whatever name it is given as SNI, an IP address too, so a caller
+  that must not (libpq sends none for an IP) passes "" and checks names itself.
 - **An engine failure in a read, write or flush is an `Other` IoError, and the stream keeps its code.** std's
   `IoError` is a kind plus an OS code, and only std can attach a code, so the engine's cannot ride in it.
   `TlsStream.tlsError()` rebuilds the `TlsError` from the kept code: `Certificate` or `Handshake` before the

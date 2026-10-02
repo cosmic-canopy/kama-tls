@@ -4,7 +4,7 @@ Where this is, 2026-10-02: `TlsConfig` and `TlsStream<S>` are done and tested, d
 arm64 and Linux aarch64. The package is ported to kama 0.9.519, which has the new `IoError` and fixes for
 every gap this package filed (KTLS-1 to KTLS-3), and it now needs that compiler. Phase 3 is under way:
 `@kama/postgres` phase 6 needs, in order, failures in words (alerts, keys, `reason()`) and the RFC 5929 fix
-(done); chain verification without SNI; certificate names, parsed from a session or a file; CRLs with OpenSSL's
+(done); chain verification without SNI and certificate names, parsed from a session or a file (done); CRLs with OpenSSL's
 check-all rule; whether the server asked for a client certificate; a step-wise identity; and, last, key export
 for `sslkeylogfile`.
 
@@ -20,9 +20,10 @@ Windows is out of scope for 0.1.0: threading there needs `MBEDTLS_THREADING_ALT`
 
 ## Known differences from OpenSSL-based clients
 
-- **An IP address given as the server name is also sent as SNI.** Mbed TLS sends whatever name it verifies
-  against, and RFC 6066 says an IP literal should not be sent. Servers ignore it in practice (PostgreSQL does).
-  Separating the two would mean verifying IP SANs by hand in a callback, which is not worth owning yet.
+- **An IP address given as the server name is also sent as SNI.** Mbed TLS sends whatever name it is given, and
+  RFC 6066 says an IP literal should not be sent. Servers ignore it in practice (PostgreSQL does). A caller that
+  must not send one passes "" under `Verify::Chain` and checks the names from `peerNames()` itself, as
+  @kama/postgres does for libpq's rules.
 - **As a TLS 1.3 server, Mbed TLS sends a client-authentication alert under its handshake keys** (it switches to
   the application keys only at wrap-up), so a client that has already switched cannot read it and reports a bad
   MAC instead of `certificate_required`. OpenSSL switches at its own Finished. This matters only when this package

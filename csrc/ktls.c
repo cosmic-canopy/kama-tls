@@ -11,8 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <mbedtls/asn1.h>
 #include <mbedtls/error.h>
 #include <mbedtls/md.h>
+#include <mbedtls/oid.h>
 #include <mbedtls/pem.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/platform_util.h>
@@ -63,9 +65,11 @@ struct ktls_config {
     int32_t alpn_count;
 };
 
-/* Chain-only verification: the chain must still verify, but the certificate's names are not compared with
-   the server name (which is still sent, as SNI). Mbed TLS 4 refuses a verifying client with no name at all,
-   so the name is set and only its mismatch flag is cleared, on the leaf. */
+/* Chain-only verification: the chain must still verify, but the certificate's names are not compared with the
+   server name. A client given a name sends it as SNI, and Mbed TLS then compares it too, so only that mismatch
+   flag is cleared, on the leaf. A client given no name sends no SNI and says so with an explicit
+   mbedtls_ssl_set_hostname(NULL), which Mbed TLS 4 takes as "verify without a name" (it refuses a verifying
+   client only when the hostname was never set at all). */
 static int ktls_verify_chain_only(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
 {
     (void)ctx; (void)crt;
@@ -306,7 +310,8 @@ ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t 
     if (c->server && !c->own_loaded) { *err = KTLS_ERR_INPUT; return NULL; }
     if (c->verify != 0 && !c->trust_loaded) { *err = KTLS_ERR_NOTRUST; return NULL; }
     int has_name = server_name != NULL && server_name[0] != 0;
-    if (!c->server && c->verify != 0 && !has_name) { *err = KTLS_ERR_INPUT; return NULL; }
+    /* Only full verification needs a name to compare; chain-only and none may go without one (and without SNI). */
+    if (!c->server && c->verify == 2 && !has_name) { *err = KTLS_ERR_INPUT; return NULL; }
     ktls_session *s = calloc(1, sizeof *s);
     if (s == NULL) { *err = KTLS_ERR_NOMEM; return NULL; }
     atomic_store_explicit(&c->frozen, 1, memory_order_release);
@@ -314,8 +319,9 @@ ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t 
     s->config = c;
     mbedtls_ssl_init(&s->ssl);
     int rc = mbedtls_ssl_setup(&s->ssl, &c->conf);
-    /* A client sends its name as SNI and, when it verifies, checks the certificate against it (chain-only
-       mode clears just the mismatch). Without a name nothing is verified, and Mbed TLS 4 wants that said. */
+    /* A client sends its name as SNI and, under full verification, checks the certificate against it (chain-only
+       mode clears just the mismatch). With no name it sends no SNI and compares no name, which Mbed TLS 4 wants
+       said explicitly. */
     if (rc == 0 && !c->server) rc = mbedtls_ssl_set_hostname(&s->ssl, has_name ? server_name : NULL);
     if (rc != 0) { *err = rc; ktls_session_free(s); return NULL; }
     mbedtls_ssl_set_bio(&s->ssl, s, ktls_bio_send, ktls_bio_recv, NULL);
@@ -577,6 +583,96 @@ size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap)
 {
     return ktls_end_point_of(mbedtls_ssl_get_peer_cert(&s->ssl), buf, cap);
 }
+
+/* The names a certificate carries, for a caller that compares them itself (libpq's host-name check), as records
+   of [kind u8][length u16, big-endian][bytes]: first the subjectAltName dNSName (kind 1) and iPAddress (kind 2)
+   entries in the certificate's order, then every subject commonName (kind 3) in the subject's order. Each value
+   is its raw bytes: an embedded NUL, a BMPString CN or an IP address of an odd length is the caller's to judge.
+   Other SAN kinds (e-mail, URI, …) are left out, as a host-name check ignores them. */
+static size_t ktls_names_of(const mbedtls_x509_crt *crt, uint8_t *buf, size_t cap)
+{
+    if (crt == NULL) return 0;
+    size_t total = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        const mbedtls_x509_sequence *san = pass == 0 ? &crt->subject_alt_names : NULL;
+        for (; san != NULL && san->buf.p != NULL; san = san->next) {
+            int type = san->buf.tag & MBEDTLS_ASN1_TAG_VALUE_MASK;
+            uint8_t kind = type == MBEDTLS_X509_SAN_DNS_NAME ? 1 : type == MBEDTLS_X509_SAN_IP_ADDRESS ? 2 : 0;
+            if (kind == 0 || san->buf.len > 0xFFFF) continue;
+            uint8_t head[3] = { kind, (uint8_t)(san->buf.len >> 8), (uint8_t)san->buf.len };
+            if (total + 3 + san->buf.len <= cap && buf != NULL) {
+                memcpy(buf + total, head, 3);
+                memcpy(buf + total + 3, san->buf.p, san->buf.len);
+            }
+            total += 3 + san->buf.len;
+        }
+        if (pass == 1) {
+            for (const mbedtls_x509_name *n = &crt->subject; n != NULL; n = n->next) {
+                if (n->oid.p == NULL || MBEDTLS_OID_CMP(MBEDTLS_OID_AT_CN, &n->oid) != 0 || n->val.len > 0xFFFF) continue;
+                uint8_t head[3] = { 3, (uint8_t)(n->val.len >> 8), (uint8_t)n->val.len };
+                if (total + 3 + n->val.len <= cap && buf != NULL) {
+                    memcpy(buf + total, head, 3);
+                    memcpy(buf + total + 3, n->val.p, n->val.len);
+                }
+                total += 3 + n->val.len;
+            }
+        }
+    }
+    return total;
+}
+
+size_t ktls_peer_names(const ktls_session *s, uint8_t *buf, size_t cap)
+{
+    return ktls_names_of(mbedtls_ssl_get_peer_cert(&s->ssl), buf, cap);
+}
+
+/* ---- a certificate on its own: parsed from PEM or DER, no session --------------------------------------- */
+
+struct ktls_cert {
+    mbedtls_x509_crt crt;
+};
+
+ktls_cert *ktls_cert_parse(const uint8_t *data, size_t len, int32_t *err)
+{
+    *err = 0;
+    if (ktls_init() != 0) { *err = KTLS_ERR_INPUT; return NULL; }
+    ktls_cert *c = calloc(1, sizeof *c);
+    if (c == NULL) { *err = KTLS_ERR_NOMEM; return NULL; }
+    mbedtls_x509_crt_init(&c->crt);
+    int rc;
+    static const char begin[] = "-----BEGIN";
+    int pem = 0;
+    for (size_t i = 0; !pem && i + (sizeof begin - 1) <= len; i++) pem = memcmp(data + i, begin, sizeof begin - 1) == 0;
+    if (pem) {
+        uint8_t *copy = ktls_terminated(data, len);
+        if (copy == NULL) { rc = KTLS_ERR_NOMEM; }
+        else { rc = mbedtls_x509_crt_parse(&c->crt, copy, len + 1); free(copy); }
+    } else {
+        rc = mbedtls_x509_crt_parse_der(&c->crt, data, len);
+    }
+    /* A PEM bundle answers how many of its certificates did not parse; only the first one is kept, and it must
+       be there. */
+    if (rc == 0 && c->crt.raw.len == 0) rc = MBEDTLS_ERR_X509_CERT_UNKNOWN_FORMAT;
+    if (rc > 0 && c->crt.raw.len > 0) rc = 0;
+    if (rc != 0) {
+        *err = rc > 0 ? MBEDTLS_ERR_X509_CERT_UNKNOWN_FORMAT : rc;
+        mbedtls_x509_crt_free(&c->crt);
+        free(c);
+        return NULL;
+    }
+    return c;
+}
+
+void ktls_cert_free(ktls_cert *c)
+{
+    if (c == NULL) return;
+    mbedtls_x509_crt_free(&c->crt);
+    free(c);
+}
+
+size_t ktls_cert_der(const ktls_cert *c, uint8_t *buf, size_t cap) { return ktls_copy_out(c->crt.raw.p, c->crt.raw.len, buf, cap); }
+size_t ktls_cert_names(const ktls_cert *c, uint8_t *buf, size_t cap) { return ktls_names_of(&c->crt, buf, cap); }
+size_t ktls_cert_end_point(const ktls_cert *c, uint8_t *buf, size_t cap) { return ktls_end_point_of(&c->crt, buf, cap); }
 
 size_t ktls_alpn(const ktls_session *s, uint8_t *buf, size_t cap)
 {

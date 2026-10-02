@@ -16,6 +16,9 @@ Needs **kama ≥ 0.9.519**.
   lower case so the list reads inside a sentence.
 
 ### Changed
+- **`Verify::Chain` takes an empty server name**: then no SNI is sent and no name is compared, and the chain still
+  decides. Mbed TLS 4 allows this through an explicit `mbedtls_ssl_set_hostname(NULL)`. `Verify::Full` still
+  needs a name. A caller that must not send an IP address as SNI (libpq) passes "" and checks names itself.
 - **Ported to kama 0.9.519**, where `std::io::IoError` is a kind plus the OS's code (`e.kind()`), not an enum.
   A read, write or flush that fails in the TLS engine answers `IoError.of(kind: IoErrorKind::Other)`, and the
   engine's code is no longer carried in the `IoError` (it was `IoError::Other(code)`). `TlsStream.tlsError()`
@@ -25,6 +28,12 @@ Needs **kama ≥ 0.9.519**.
   Copyright is Cosmic Canopy LLC and the kama contributors. Mbed TLS stays Apache-2.0 OR GPL-2.0-or-later.
 
 ### Added
+- `Certificate.parse(bytes)`: an X.509 certificate from PEM or DER, with no session, and its `der()`, `names()` and
+  `tlsServerEndPoint()`.
+- `CertificateNames` (`count()`, `kindAt(index:)`, `valueAt(index:)`) and `TlsStream.peerNames()`: the names a
+  certificate carries, in the order a host-name check meets them (subjectAltName dNSName and iPAddress entries,
+  then subject commonNames), each as its raw bytes. A caller that checks names by its own rules (libpq's) reads
+  them here.
 - `TlsError::Alert(description, name, established)`: the peer ended the session with a fatal alert, by its RFC
   number and name (48 `unknown_ca`, 70 `protocol_version`, 116 `certificate_required`, …), and whether the
   handshake had finished. Before, an alert was a `Handshake` or `Session` error saying only "A fatal alert message

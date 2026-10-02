@@ -1,0 +1,114 @@
+import { std::collections::ConstView, std::collections::DynamicArray, std::collections::FixedArray, tls::TlsError, tls::errorText };
+export { Certificate, CertificateNames, NameKind };
+
+// A certificate on its own — parsed from PEM or DER, with no session — and the names a certificate carries, for a
+// caller that compares a host name itself (libpq does: its rules for which names count, the CN fallback and the
+// wildcard are its own, and so are its messages). `TlsStream.peerNames()` gives the same names for the
+// certificate a peer presented.
+
+extern "ktls.h";
+extern fn UnsafePtr ktls_cert_parse(UnsafeConstPtr<uint8> data, usize len, UnsafePtr<int32> err);
+extern fn void ktls_cert_free(UnsafePtr c);
+extern fn usize ktls_cert_der(UnsafePtr c, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_cert_names(UnsafePtr c, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_cert_end_point(UnsafePtr c, UnsafePtr<uint8> buf, usize cap);
+
+// Which kind of name: a subjectAltName dNSName or iPAddress entry, or a commonName of the subject.
+type enum NameKind { DnsName, IpAddress, CommonName }
+
+// The names, in the order a host-name check meets them: the subjectAltName dNSName and iPAddress entries as the
+// certificate lists them, then every subject commonName. Each value is its raw bytes — a dNSName's IA5 text, an
+// address's 4 or 16 bytes (or whatever length the certificate gives), a commonName's string as encoded — so an
+// embedded NUL or an odd length is visible to the caller. Other subjectAltName kinds are left out.
+type resource CertificateNames implements Sendable {
+    DynamicArray<uint8> kinds;                  // 1 dNSName, 2 iPAddress, 3 commonName
+    DynamicArray<DynamicArray<uint8>> values;
+
+    friend tls::TlsStream::peerNames[fromRecords];
+    friend tls::Certificate::names[fromRecords];
+
+    ctor empty() { this.kinds = DynamicArray.empty(); this.values = DynamicArray.empty(); }
+
+    // From ktls's records: [kind u8][length u16, big-endian][bytes], as many as `records` holds. A record cut short
+    // ends the list, which only a truncated buffer could cause.
+    ctor fromRecords(const ref DynamicArray<uint8> records) {
+        this.kinds = DynamicArray.empty();
+        this.values = DynamicArray.empty();
+        isize at = 0;
+        while (at + 3 <= records.length()) {
+            uint8 kind = records[at];
+            isize len = cast<isize>(records[at + 1]) * 256 + cast<isize>(records[at + 2]);
+            at = at + 3;
+            if (at + len > records.length()) { at = records.length(); }
+            else {
+                DynamicArray<uint8> value = DynamicArray.withCapacity(capacity: len);
+                isize i = 0;
+                while (i < len) { value.add(item: records[at + i]); i = i + 1; }
+                this.kinds.add(item: kind);
+                this.values.add(item: give value);
+                at = at + len;
+            }
+        }
+    }
+
+    public const fn isize count() { return this.kinds.length(); }
+
+    public const fn NameKind kindAt(isize index) {
+        uint8 k = this.kinds[index];
+        if (k == 1ui8) { return NameKind::DnsName; }
+        if (k == 2ui8) { return NameKind::IpAddress; }
+        return NameKind::CommonName;
+    }
+
+    public const fn const ref DynamicArray<uint8> valueAt(isize index) { return this.values[index]; }
+}
+
+// One X.509 certificate, parsed. The first certificate of a PEM bundle is the one kept.
+type resource Certificate implements Sendable {
+    UnsafePtr handle;
+
+    unsafe ctor adopt(UnsafePtr handle) { this.handle = handle; }
+
+    // A certificate from PEM text or DER bytes. A `Config` error says why it did not parse.
+    public unsafe ctor Result<Certificate, TlsError> parse(ConstView<uint8> bytes) {
+        int32 err = 0;
+        UnsafePtr c = ktls_cert_parse(data: bytes.dataPtr(), len: cast<usize>(bytes.length()), err: addr(of: err));
+        if (c == null) { return Result::Err(error: TlsError::Config(code: err, detail: errorText(code: err))); }
+        return Result::Ok(value: Certificate.adopt(handle: c));
+    }
+
+    // The certificate's DER encoding.
+    public unsafe fn DynamicArray<uint8> der() { return this.bytesFrom(which: 0); }
+
+    // Its names, as a host-name check reads them.
+    public unsafe fn CertificateNames names() {
+        DynamicArray<uint8> records = this.bytesFrom(which: 1);
+        return CertificateNames.fromRecords(records: records);
+    }
+
+    // RFC 5929 tls-server-end-point for this certificate, as `TlsStream.tlsServerEndPoint()` gives it for a peer's:
+    // empty when its signature hash is not one a server would use.
+    public unsafe fn DynamicArray<uint8> tlsServerEndPoint() { return this.bytesFrom(which: 2); }
+
+    unsafe fn DynamicArray<uint8> bytesFrom(int32 which) {
+        isize cap = 1024;
+        while (true) {
+            FixedArray<uint8> buf = FixedArray.make(size: cap);
+            usize got = 0;
+            if (which == 0) { got = ktls_cert_der(c: this.handle, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else if (which == 1) { got = ktls_cert_names(c: this.handle, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else { got = ktls_cert_end_point(c: this.handle, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            isize n = cast<isize>(got);
+            if (n <= cap) {
+                DynamicArray<uint8> result = DynamicArray.withCapacity(capacity: n);
+                isize i = 0;
+                while (i < n) { result.add(item: buf[i]); i = i + 1; }
+                return result;
+            }
+            cap = n;
+        }
+        return DynamicArray.empty();
+    }
+
+    unsafe ~Certificate() { if (this.handle != null) { ktls_cert_free(c: this.handle); } }
+}

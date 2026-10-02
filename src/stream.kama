@@ -1,6 +1,6 @@
 import { std::io::IoError, std::io::IoErrorKind, std::io::Reader, std::io::Writer, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
          std::collections::FixedArray, std::collections::DynamicArray,
-         tls::TlsError, tls::TlsConfig, tls::TlsVersion, tls::Progress, tls::errorText };
+         tls::TlsError, tls::TlsConfig, tls::TlsVersion, tls::Progress, tls::errorText, tls::CertificateNames };
 export { TlsStream };
 
 // A TLS session over a stream: `TlsStream<TcpStream>`, `TlsStream<UnixStream>`, or anything else that is a
@@ -35,6 +35,7 @@ extern fn int32 ktls_fatal_alert(UnsafePtr s);
 extern fn usize ktls_alert_name(int32 description, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_peer_cert(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_end_point(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_peer_names(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_alpn(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_ciphersuite(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn int32 ktls_protocol(UnsafePtr s);
@@ -79,9 +80,11 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         this.failedWith = 0;
     }
 
-    // A client session over `inner`. `serverName` is sent as SNI and, under `Verify::Full`, is the name the
-    // server's certificate must carry (a DNS name or an IP address). The handshake runs on first use, or
-    // explicitly with `handshake()`.
+    // A client session over `inner`. `serverName` is sent as SNI, as it is (an IP address too), and under
+    // `Verify::Full` it is the name the server's certificate must carry (a DNS name or an IP address), so Full
+    // needs one. Under `Verify::Chain` or `Verify::None` it may be "": then no SNI is sent and no name is
+    // compared, and a caller that checks names itself does so with `peerNames()`. The handshake runs on first
+    // use, or explicitly with `handshake()`.
     public unsafe ctor Result<TlsStream<S>, TlsError> client(S inner, const ref TlsConfig config,
                                                             const ref string serverName) {
         return TlsStream::<S>.open(inner: give inner, config: config.raw(), name: serverName);
@@ -207,6 +210,13 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         return this.bytesFrom(which: 1);
     }
 
+    // The names on the peer's certificate (subjectAltName dNSName and iPAddress entries, then subject commonNames),
+    // for a caller that checks a host name itself; none when the peer sent no certificate.
+    public unsafe fn CertificateNames peerNames() {
+        DynamicArray<uint8> records = this.bytesFrom(which: 4);
+        return CertificateNames.fromRecords(records: records);
+    }
+
     // The application protocol both sides agreed by ALPN, if any.
     public unsafe fn Optional<string> alpnProtocol() {
         DynamicArray<uint8> b = this.bytesFrom(which: 2);
@@ -327,7 +337,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
     }
 
     // One of the byte answers, at its full length: 0 the peer certificate, 1 the end-point hash, 2 the ALPN
-    // protocol, 3 the cipher suite.
+    // protocol, 3 the cipher suite, 4 the peer certificate's names.
     unsafe fn DynamicArray<uint8> bytesFrom(int32 which) {
         isize cap = 256;
         while (true) {
@@ -336,6 +346,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
             if (which == 0) { got = ktls_peer_cert(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else if (which == 1) { got = ktls_end_point(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else if (which == 2) { got = ktls_alpn(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else if (which == 4) { got = ktls_peer_names(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else { got = ktls_ciphersuite(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             isize n = cast<isize>(got);
             if (n <= cap) {

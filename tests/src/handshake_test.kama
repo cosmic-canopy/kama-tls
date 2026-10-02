@@ -174,8 +174,31 @@ fn int32 verificationTests() {
     Outcome o9 = attempt(mode: Verify::None, ca: none, certName: expCrt, keyName: expKey, name: localhost);
     f = f + check(ok: completed(o: o9), what: "verify: None accepts anything, by name (".concat(other: describe(o: o9)).concat(other: ")"));
 
+    // Chain-only with no name: no SNI, no name compared, and the chain still decides (libpq's verify-ca, and its
+    // verify-full, which compares names itself).
+    Outcome o10 = attempt(mode: Verify::Chain, ca: ca, certName: wrongCrt, keyName: wrongKey, name: none);
+    f = f + check(ok: completed(o: o10), what: "verify: Chain with no name accepts a certificate that chains (".concat(other: describe(o: o10)).concat(other: ")"));
+    Outcome o11 = attempt(mode: Verify::Chain, ca: other, certName: srvCrt, keyName: srvKey, name: none);
+    f = f + check(ok: rejectedWith(o: o11, want: BADCERT_NOT_TRUSTED), what: "verify: Chain with no name still rejects an untrusted CA (".concat(other: describe(o: o11)).concat(other: ")"));
+
     f = f + noTrustTest();
+    f = f + fullNeedsNameTest();
     return f;
+}
+
+// Full verification compares a name, so a client without one is refused before it sends a byte.
+fn int32 fullNeedsNameTest() {
+    string ca = "ca.crt";
+    string none = "";
+    string srvCrt = "server.crt"; string srvKey = "server.key";
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "verify: client config"); } };
+    Result<TlsConfig, TlsError> srv = serverConfig(certName: srvCrt, keyName: srvKey);
+    TlsConfig server = match (give srv) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "verify: server config"); } };
+    Result<Session, TlsError> s = connect(client: client, server: server, name: none);
+    TlsError why = match (give s) { case Ok(value: x): { return check(ok: false, what: "verify: Full with no name is refused up front"); } case Err(error: e): give e; };
+    bool refused = match (why) { case Config(code: c, detail: d): c == -5; case _: false; };
+    return check(ok: refused, what: "verify: Full with no name is refused up front");
 }
 
 // A verifying client with nothing to verify against is refused before it sends a byte.
