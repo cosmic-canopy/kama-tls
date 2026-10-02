@@ -9,6 +9,11 @@ All notable changes to this package are recorded here. The format follows
 Needs **kama ≥ 0.9.519**.
 
 ### Fixed
+- An identity whose key does not belong to its certificate is refused when it is loaded. Before, nothing compared
+  them, and the handshake failed later with a signature error. The comparison is ktls's own: TF-PSA-Crypto 1.2.0's
+  `mbedtls_pk_check_pair` refuses every parsed RSA private key, because it leaves that key's cached public half
+  empty.
+- `identityPem` took a DER key with an extra NUL and could not parse it; DER is now passed at its exact length.
 - `tlsServerEndPoint()` follows RFC 5929 as PostgreSQL does: only an MD5 or SHA-1 signature hashes with SHA-256,
   and a SHA-224 signature hashes with SHA-224 (it used SHA-256, so SCRAM-SHA-256-PLUS failed against such a
   certificate). A signature hash outside MD5/SHA-1/SHA-2 gives no binding rather than a guess.
@@ -28,6 +33,14 @@ Needs **kama ≥ 0.9.519**.
   Copyright is Cosmic Canopy LLC and the kama contributors. Mbed TLS stays Apache-2.0 OR GPL-2.0-or-later.
 
 ### Added
+- An identity in two steps, so a failure says which: `TlsConfig.certificateChain(bytes)` (PEM or DER; the first
+  certificate is this side's), then `privateKey(bytes, password)` (PEM or DER at its exact length, decrypted when a
+  password is given), which must pair with that certificate or fails with code -8, "the private key does not
+  match the certificate". `identityFiles` and `identityPem` run both steps and check the pair too.
+- `trustSystemWith(certFile:)`: `trustSystem()` with SSL_CERT_FILE's value supplied by the caller.
+- `TlsStream.keyBits()`, and for a non-blocking caller `hasPendingOutput()` (ciphertext the transport has not
+  taken: flush before waiting for an answer) and `hasBufferedInput()` (bytes a read answers without the transport:
+  read them before waiting).
 - `TlsStream.certificateRequested()`: a client learns whether the server asked for a certificate (libpq's
   `sslcertmode=require` needs it). The handshake now runs a step at a time in ktls, which samples Mbed TLS's
   private handshake state between steps.

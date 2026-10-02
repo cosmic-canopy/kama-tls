@@ -15,6 +15,7 @@
 #   client-pkcs8.key             client.key encrypted as PKCS#8 (PBES2, AES-256-CBC, HMAC-SHA256)
 #   client-trad.key              client.key encrypted as a traditional PEM (AES-256-CBC); both use KEY_PASSWORD
 #   mismatch.key                 an RSA key that is NOT client.crt's: an identity check must fail
+#   client.der / client-key.der  client.crt and client.key as DER (the key as PKCS#8)
 #   server-sha224 / -sha384 / -sha1 .crt/.key   localhost leaves signed with that hash, each with a .endpoint file:
 #                                the RFC 5929 tls-server-end-point hash in hex, computed by openssl from the DER
 #   revoked.crt / revoked.key    a localhost leaf the CA has revoked
@@ -32,7 +33,7 @@ DIR="$ROOT/out/test-certs"
 OPENSSL=${OPENSSL:-openssl}
 
 # Bump GENERATION when the set of files changes, so an older out/test-certs is regenerated rather than used.
-GENERATION=3
+GENERATION=4
 KEY_PASSWORD='kama-tls test key pw'
 if [ "$(cat "$DIR/.generation" 2>/dev/null)" = "$GENERATION" ] && [ "${1:-}" != "--force" ]; then
     exit 0
@@ -128,6 +129,8 @@ if ! "$OPENSSL" rsa -aes256 -traditional -in client.key -out ../client-trad.key 
 fi
 grep -q 'Proc-Type: 4,ENCRYPTED' ../client-trad.key || { echo "gen-certs: client-trad.key is not a traditional encrypted PEM" >&2; exit 1; }
 ossl genrsa -out ../mismatch.key 2048
+ossl x509 -in client.crt -outform DER -out ../client.der
+ossl pkcs8 -topk8 -nocrypt -in client.key -outform DER -out ../client-key.der
 
 # Revocation: an empty CRL first, then revoke a leaf and issue the CRL that lists it. The untrusted CA issues an
 # empty CRL of its own.
@@ -144,6 +147,6 @@ ossl ca -batch -config other-ca-sign.cnf -gencrl -crldays 3650 -out ../other-ca.
 
 cp ca.crt other-ca.crt ..
 cd .. && rm -rf work
-chmod 0644 ./*.crt ./*.key ./*.crl ./*.endpoint crldir/*
+chmod 0644 ./*.crt ./*.key ./*.der ./*.crl ./*.endpoint crldir/*
 echo "$GENERATION" > .generation
 echo "gen-certs: wrote $(ls | wc -l | tr -d ' ') entries to out/test-certs"

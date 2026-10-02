@@ -21,6 +21,7 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/platform_util.h>
 #include <mbedtls/ssl.h>
+#include <mbedtls/ssl_ciphersuites.h>
 #include <mbedtls/version.h>
 #include <mbedtls/x509_crl.h>
 #include <mbedtls/x509_crt.h>
@@ -176,6 +177,14 @@ int32_t ktls_config_trust_file(ktls_config *c, const char *path)
     return rc;   /* > 0: that many certificates in the file could not be parsed and were skipped */
 }
 
+/* Whether bytes are PEM text (they hold a "-----BEGIN" line) rather than DER. */
+static int ktls_is_pem(const uint8_t *data, size_t len)
+{
+    static const char begin[] = "-----BEGIN";
+    for (size_t i = 0; i + (sizeof begin - 1) <= len; i++) if (memcmp(data + i, begin, sizeof begin - 1) == 0) return 1;
+    return 0;
+}
+
 /* PEM parsing wants the buffer NUL-terminated, with the NUL counted in the length. */
 static uint8_t *ktls_terminated(const uint8_t *buf, size_t len)
 {
@@ -213,11 +222,8 @@ int32_t ktls_config_crl_pem(ktls_config *c, const uint8_t *data, size_t len)
 {
     if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
     /* PEM wants the buffer NUL-terminated with the NUL counted; DER takes its exact length. */
-    static const char begin[] = "-----BEGIN";
-    int pem = 0;
-    for (size_t i = 0; !pem && i + (sizeof begin - 1) <= len; i++) pem = memcmp(data + i, begin, sizeof begin - 1) == 0;
     int rc;
-    if (pem) {
+    if (ktls_is_pem(data, len)) {
         uint8_t *copy = ktls_terminated(data, len);
         if (copy == NULL) return KTLS_ERR_NOMEM;
         rc = mbedtls_x509_crl_parse(&c->crl, copy, len + 1);
@@ -246,34 +252,92 @@ static int32_t ktls_config_apply_identity(ktls_config *c)
     return 0;
 }
 
+/* Whether a private key pairs with a certificate's public key: the same key type, size and public key bytes.
+   mbedtls_pk_check_pair compares the two contexts' cached public halves, but TF-PSA-Crypto 1.2.0 leaves that
+   cache empty for a parsed RSA private key (pk_rsa.c fills it only for public keys), so it refuses every RSA
+   pair. Here the private key's public half comes from PSA when the cache is empty, as pkwrite.c does it. */
+static int ktls_pair_matches(const mbedtls_pk_context *pub, const mbedtls_pk_context *prv)
+{
+    if (pub->pk_info == NULL || prv->pk_info == NULL || pub->pub_raw_len == 0) return 0;
+    if (!PSA_KEY_TYPE_IS_KEY_PAIR(prv->psa_type) || pub->psa_type != PSA_KEY_TYPE_PUBLIC_KEY_OF_KEY_PAIR(prv->psa_type)) return 0;
+    if (mbedtls_pk_get_bitlen(pub) != mbedtls_pk_get_bitlen(prv)) return 0;
+    const uint8_t *raw = prv->pub_raw;
+    size_t len = prv->pub_raw_len;
+    uint8_t exported[MBEDTLS_PK_MAX_PUBKEY_RAW_LEN];
+    if (len == 0) {
+        if (psa_export_public_key(prv->priv_id, exported, sizeof exported, &len) != PSA_SUCCESS) return 0;
+        raw = exported;
+    }
+    return len == pub->pub_raw_len && memcmp(raw, pub->pub_raw, len) == 0;
+}
+
+/* The identity is loaded in two steps, so a caller can tell which one failed: the certificate chain (the first
+   certificate is this side's, the rest its chain), then the private key, which must decrypt with the password
+   and pair with the first certificate. Only then is the identity installed. Each step takes PEM or DER. */
+int32_t ktls_config_certificate_chain(ktls_config *c, const uint8_t *data, size_t len)
+{
+    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    if (c->own_loaded || c->own_cert.raw.len > 0) return KTLS_ERR_INPUT;   /* one identity per configuration */
+    int rc;
+    if (ktls_is_pem(data, len)) {
+        uint8_t *copy = ktls_terminated(data, len);
+        if (copy == NULL) return KTLS_ERR_NOMEM;
+        rc = mbedtls_x509_crt_parse(&c->own_cert, copy, len + 1);
+        free(copy);
+    } else {
+        rc = mbedtls_x509_crt_parse_der(&c->own_cert, data, len);
+    }
+    if (rc > 0) rc = KTLS_ERR_INPUT;   /* some certificate of a PEM chain did not parse */
+    if (rc == 0 && c->own_cert.raw.len == 0) rc = MBEDTLS_ERR_X509_CERT_UNKNOWN_FORMAT;
+    if (rc != 0) { mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert); }
+    return rc;
+}
+
+int32_t ktls_config_private_key(ktls_config *c, const uint8_t *data, size_t len, const uint8_t *password, size_t password_len)
+{
+    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    if (c->own_loaded || c->own_cert.raw.len == 0) return KTLS_ERR_INPUT;   /* the chain comes first */
+    const uint8_t *pw = password_len > 0 ? password : NULL;
+    int rc;
+    if (ktls_is_pem(data, len)) {
+        uint8_t *copy = ktls_terminated(data, len);
+        if (copy == NULL) return KTLS_ERR_NOMEM;
+        rc = mbedtls_pk_parse_key(&c->own_key, copy, len + 1, pw, password_len);
+        mbedtls_platform_zeroize(copy, len + 1);
+        free(copy);
+    } else {
+        rc = mbedtls_pk_parse_key(&c->own_key, data, len, pw, password_len);
+    }
+    if (rc == 0 && !ktls_pair_matches(&c->own_cert.pk, &c->own_key)) rc = KTLS_ERR_KEY_MISMATCH;
+    if (rc != 0) { mbedtls_pk_free(&c->own_key); mbedtls_pk_init(&c->own_key); return rc; }
+    return ktls_config_apply_identity(c);
+}
+
+/* Both steps, from files: an unreadable file is Mbed TLS's FILE_IO error for that step. */
 int32_t ktls_config_identity_files(ktls_config *c, const char *cert, const char *key, const char *password)
 {
     if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
-    if (c->own_loaded) return KTLS_ERR_INPUT;   /* one identity per configuration */
+    if (c->own_loaded || c->own_cert.raw.len > 0) return KTLS_ERR_INPUT;
     int rc = mbedtls_x509_crt_parse_file(&c->own_cert, cert);
-    if (rc != 0) return rc < 0 ? rc : KTLS_ERR_INPUT;
+    if (rc > 0) rc = KTLS_ERR_INPUT;
+    if (rc != 0) { mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert); return rc; }
     rc = mbedtls_pk_parse_keyfile(&c->own_key, key, (password != NULL && password[0] != 0) ? password : NULL);
-    if (rc != 0) return rc;
+    if (rc == 0 && !ktls_pair_matches(&c->own_cert.pk, &c->own_key)) rc = KTLS_ERR_KEY_MISMATCH;
+    if (rc != 0) {
+        mbedtls_pk_free(&c->own_key); mbedtls_pk_init(&c->own_key);
+        mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert);
+        return rc;
+    }
     return ktls_config_apply_identity(c);
 }
 
 int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cert_len,
                                  const uint8_t *key, size_t key_len, const uint8_t *password, size_t password_len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
-    if (c->own_loaded) return KTLS_ERR_INPUT;
-    uint8_t *cert_z = ktls_terminated(cert, cert_len);
-    uint8_t *key_z = ktls_terminated(key, key_len);
-    int rc = KTLS_ERR_NOMEM;
-    if (cert_z != NULL && key_z != NULL) {
-        rc = mbedtls_x509_crt_parse(&c->own_cert, cert_z, cert_len + 1);
-        if (rc > 0) rc = KTLS_ERR_INPUT;
-        if (rc == 0) rc = mbedtls_pk_parse_key(&c->own_key, key_z, key_len + 1,
-                                               password_len > 0 ? password : NULL, password_len);
-        if (rc == 0) rc = ktls_config_apply_identity(c);
-    }
-    if (key_z != NULL) { mbedtls_platform_zeroize(key_z, key_len + 1); free(key_z); }
-    free(cert_z);
+    int rc = ktls_config_certificate_chain(c, cert, cert_len);
+    if (rc != 0) return rc;
+    rc = ktls_config_private_key(c, key, key_len, password, password_len);
+    if (rc != 0) { mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert); }
     return rc;
 }
 
@@ -466,6 +530,17 @@ int32_t ktls_handshake(ktls_session *s)
 
 int32_t ktls_cert_requested(const ktls_session *s) { return s->cert_requested; }
 
+/* Received bytes not yet handed to the caller: plaintext Mbed TLS has decrypted, and ciphertext fed but not yet
+   taken. A caller about to wait for the transport must read these first. */
+size_t ktls_in_pending(const ktls_session *s) { return (s->in.end - s->in.start) + mbedtls_ssl_get_bytes_avail(&s->ssl); }
+
+int32_t ktls_key_bits(const ktls_session *s)
+{
+    if (!mbedtls_ssl_is_handshake_over((mbedtls_ssl_context *)&s->ssl)) return 0;
+    const mbedtls_ssl_ciphersuite_t *info = mbedtls_ssl_ciphersuite_from_id(mbedtls_ssl_get_ciphersuite_id_from_ssl(&s->ssl));
+    return info == NULL ? 0 : (int32_t)mbedtls_ssl_ciphersuite_get_cipher_key_bitlen(info);
+}
+
 size_t ktls_sni(const ktls_session *s, uint8_t *buf, size_t cap)
 {
     return s->sni == NULL ? 0 : ktls_copy_out(s->sni, strlen(s->sni), buf, cap);
@@ -595,12 +670,14 @@ size_t ktls_error_text(int32_t code, uint8_t *buf, size_t cap)
     static const char input[] = "invalid argument";
     static const char notrust[] = "no trust roots to verify the peer against";
     static const char truncated[] = "the connection ended without a TLS close_notify (truncated)";
+    static const char mismatch[] = "the private key does not match the certificate";
     switch (code) {
         case KTLS_ERR_NOMEM:   return ktls_copy_out(nomem, sizeof nomem - 1, buf, cap);
         case KTLS_ERR_FROZEN:  return ktls_copy_out(frozen, sizeof frozen - 1, buf, cap);
         case KTLS_ERR_INPUT:   return ktls_copy_out(input, sizeof input - 1, buf, cap);
         case KTLS_ERR_NOTRUST: return ktls_copy_out(notrust, sizeof notrust - 1, buf, cap);
         case KTLS_TRUNCATED:   return ktls_copy_out(truncated, sizeof truncated - 1, buf, cap);
+        case KTLS_ERR_KEY_MISMATCH: return ktls_copy_out(mismatch, sizeof mismatch - 1, buf, cap);
         default: break;
     }
     const char *known = ktls_known_text(code);
@@ -751,10 +828,7 @@ ktls_cert *ktls_cert_parse(const uint8_t *data, size_t len, int32_t *err)
     if (c == NULL) { *err = KTLS_ERR_NOMEM; return NULL; }
     mbedtls_x509_crt_init(&c->crt);
     int rc;
-    static const char begin[] = "-----BEGIN";
-    int pem = 0;
-    for (size_t i = 0; !pem && i + (sizeof begin - 1) <= len; i++) pem = memcmp(data + i, begin, sizeof begin - 1) == 0;
-    if (pem) {
+    if (ktls_is_pem(data, len)) {
         uint8_t *copy = ktls_terminated(data, len);
         if (copy == NULL) { rc = KTLS_ERR_NOMEM; }
         else { rc = mbedtls_x509_crt_parse(&c->crt, copy, len + 1); free(copy); }
@@ -818,4 +892,4 @@ _Static_assert((KTLS_BADCERT_NO_CRL & (MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X5
                MBEDTLS_X509_BADCRL_BAD_PK | MBEDTLS_X509_BADCRL_BAD_KEY)) == 0, "KTLS_BADCERT_NO_CRL collides");
 _Static_assert(KTLS_BADCERT_NO_CRL == 0x01000000, "config.kama BADCERT_NO_CRL");
 _Static_assert(MBEDTLS_SSL_VERSION_TLS1_2 == 771 && MBEDTLS_SSL_VERSION_TLS1_3 == 772, "TLS version numbers");
-_Static_assert(KTLS_ERR_NOMEM == -3 && KTLS_ERR_INPUT == -5, "config.kama error codes");
+_Static_assert(KTLS_ERR_NOMEM == -3 && KTLS_ERR_INPUT == -5 && KTLS_ERR_KEY_MISMATCH == -8, "config.kama error codes");

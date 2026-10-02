@@ -1,0 +1,155 @@
+// An identity in two steps (the chain, then the key that pairs with it), each failing on its own; the system
+// trust store with SSL_CERT_FILE given by the caller; and the session state a non-blocking caller needs: key
+// bits, ciphertext still to send, plaintext still to read.
+import { std::io::IoError, std::collections::DynamicArray, std::collections::FixedArray, std::fs::readFile,
+         std::io::writeAll,
+         tls::TlsConfig, tls::TlsError, tls::Verify,
+         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome,
+         tls_tests::keyPassword };
+export { identityTests };
+
+fn DynamicArray<uint8> bytesOf(const ref string name) {
+    Result<DynamicArray<uint8>, IoError> read = readFile(path: certPath(name: name));
+    return match (give read) { case Ok(value: b): give b; case Err(error: e): { panic(msg: "read fixture"); return DynamicArray.empty(); } };
+}
+
+fn int32 codeOf(Result<Unit, TlsError> r) {
+    return match (give r) { case Ok(value: u): 0; case Err(error: e): match (e) { case Config(code: c, detail: d): c; case _: -1000; }; };
+}
+
+// A server that requires a client certificate chaining to the test CA, and a client whose identity came in steps.
+fn bool acceptedBy(ref TlsConfig client) {
+    string crt = "server.crt"; string key = "server.key";
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: crt, keyName: key);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { return false; } };
+    Result<Unit, TlsError> v = server.verify(mode: Verify::Chain);
+    Result<Unit, TlsError> t = server.trustFile(path: certPath(name: "ca.crt"));
+    string localhost = "localhost";
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return false; } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    return completed(o: o);
+}
+
+fn TlsConfig freshClient() {
+    string ca = "ca.crt";
+    Result<TlsConfig, TlsError> made = clientConfig(mode: Verify::Full, caName: ca);
+    return match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "client config"); return freshClient(); } };
+}
+
+fn int32 stepTests() {
+    int32 f = 0;
+    string nopw = "";
+    DynamicArray<uint8> crtPem = bytesOf(name: "client.crt");
+    DynamicArray<uint8> crtDer = bytesOf(name: "client.der");
+    DynamicArray<uint8> keyPem = bytesOf(name: "client.key");
+    DynamicArray<uint8> keyDer = bytesOf(name: "client-key.der");
+    DynamicArray<uint8> keyP8 = bytesOf(name: "client-pkcs8.key");
+    DynamicArray<uint8> wrongKey = bytesOf(name: "mismatch.key");
+    string pw = keyPassword();
+
+    TlsConfig a = freshClient();
+    f = f + check(ok: codeOf(r: a.certificateChain(bytes: crtPem.view())) == 0, what: "identity: a PEM chain loads");
+    f = f + check(ok: codeOf(r: a.privateKey(bytes: keyPem.view(), password: nopw.bytes())) == 0, what: "identity: its PEM key pairs with it");
+    f = f + check(ok: acceptedBy(client: a), what: "identity: a server requiring a certificate accepts the stepped identity");
+
+    TlsConfig b = freshClient();
+    f = f + check(ok: codeOf(r: b.certificateChain(bytes: crtDer.view())) == 0, what: "identity: a DER certificate loads");
+    f = f + check(ok: codeOf(r: b.privateKey(bytes: keyDer.view(), password: nopw.bytes())) == 0, what: "identity: a DER key, at its exact length, pairs with it");
+    f = f + check(ok: acceptedBy(client: b), what: "identity: a DER identity is accepted");
+
+    TlsConfig c = freshClient();
+    f = f + check(ok: codeOf(r: c.certificateChain(bytes: crtPem.view())) == 0, what: "identity: the chain again");
+    f = f + check(ok: codeOf(r: c.privateKey(bytes: keyP8.view(), password: pw.bytes())) == 0, what: "identity: an encrypted PKCS#8 key with its password");
+
+    TlsConfig d = freshClient();
+    f = f + check(ok: codeOf(r: d.privateKey(bytes: keyPem.view(), password: nopw.bytes())) == -5, what: "identity: a key before any chain is refused");
+    f = f + check(ok: codeOf(r: d.certificateChain(bytes: crtPem.view())) == 0, what: "identity: the chain after the refusal");
+    f = f + check(ok: codeOf(r: d.privateKey(bytes: wrongKey.view(), password: nopw.bytes())) == -8, what: "identity: a key that is not the certificate's is -8");
+    Result<Unit, TlsError> mismatch = d.privateKey(bytes: wrongKey.view(), password: nopw.bytes());
+    string words = match (give mismatch) { case Ok(value: u): ""; case Err(error: e): e.reason(); };
+    f = f + check(ok: words.equals(other: "the private key does not match the certificate"), what: "identity: the mismatch in words (".concat(other: words).concat(other: ")"));
+    f = f + check(ok: codeOf(r: d.privateKey(bytes: keyPem.view(), password: nopw.bytes())) == 0, what: "identity: the right key after a wrong one");
+
+    TlsConfig e = freshClient();
+    string junk = "not a certificate";
+    f = f + check(ok: codeOf(r: e.certificateChain(bytes: junk.bytes())) < 0, what: "identity: bytes that are no certificate are refused");
+    f = f + check(ok: codeOf(r: e.certificateChain(bytes: crtPem.view())) == 0, what: "identity: a refused chain leaves nothing behind");
+    return f;
+}
+
+fn int32 systemTests() {
+    int32 f = 0;
+    Result<TlsConfig, TlsError> m1 = TlsConfig.client();
+    TlsConfig c1 = match (give m1) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "system: client"); } };
+    string ca = certPath(name: "ca.crt");
+    Result<isize, TlsError> named = c1.trustSystemWith(certFile: Optional::Some(value: give ca));
+    bool one = match (give named) { case Ok(value: n): n == 1; case Err(error: e): false; };
+    f = f + check(ok: one, what: "system: SSL_CERT_FILE given by the caller is the one file trusted");
+    Result<TlsConfig, TlsError> m2 = TlsConfig.client();
+    TlsConfig c2 = match (give m2) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "system: client"); } };
+    string missing = certPath(name: "no-such-bundle.pem");
+    Result<isize, TlsError> absent = c2.trustSystemWith(certFile: Optional::Some(value: give missing));
+    bool refused = match (give absent) { case Ok(value: n): false; case Err(error: e): true; };
+    f = f + check(ok: refused, what: "system: a named bundle that is not there is an error");
+    return f;
+}
+
+fn int32 sessionStateTests() {
+    int32 f = 0;
+    string ca = "ca.crt";
+    string crt = "server.crt"; string key = "server.key";
+    string localhost = "localhost";
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "state: client config"); } };
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: crt, keyName: key);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "state: server config"); } };
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "state: session"); } };
+    f = f + check(ok: pair.c().keyBits() == 0, what: "state: no key bits before the handshake");
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    f = f + check(ok: completed(o: o), what: "state: handshake (".concat(other: describe(o: o)).concat(other: ")"));
+    string suite = pair.c().cipherSuite();
+    isize bits = pair.c().keyBits();
+    bool fits = (suite.contains(substring: "AES-256") || suite.contains(substring: "CHACHA20")) && bits == 256
+             || suite.contains(substring: "AES-128") && bits == 128;
+    f = f + check(ok: fits, what: "state: key bits fit the suite (".concat(other: suite).concat(other: " ${bits})"));
+
+    // A full send buffer: the write takes the plaintext, the ciphertext waits, and flush() says so until the
+    // transport takes it.
+    pair.c().innerRefMut().blockWrites(on: true);
+    string hello = "hello over a full socket";
+    Result<isize, IoError> w = pair.c().write(bytes: hello.bytes());
+    bool taken = match (w) { case Ok(value: n): n == hello.length(); case Err(error: e): false; };
+    f = f + check(ok: taken, what: "state: a write takes the plaintext while the transport is full");
+    f = f + check(ok: pair.c().hasPendingOutput(), what: "state: the ciphertext is pending");
+    Result<Unit, IoError> blocked = pair.c().flush();
+    bool wouldBlock = match (blocked) { case Ok(value: u): false; case Err(error: e): match (e.kind()) { case WouldBlock: true; case _: false; }; };
+    f = f + check(ok: wouldBlock, what: "state: flush() answers WouldBlock while it cannot send");
+    pair.c().innerRefMut().blockWrites(on: false);
+    Result<Unit, IoError> flushed = pair.c().flush();
+    bool sent = match (flushed) { case Ok(value: u): true; case Err(error: e): false; };
+    f = f + check(ok: sent && !pair.c().hasPendingOutput(), what: "state: flush() sends it once the transport takes it");
+
+    // The server reads part of what arrived: the rest is buffered, and readable without the transport.
+    FixedArray<uint8> small = FixedArray.make(size: 5);
+    Result<isize, IoError> part = pair.s().read(into: small.viewMut());
+    bool five = match (part) { case Ok(value: n): n == 5; case Err(error: e): false; };
+    f = f + check(ok: five, what: "state: a short read takes 5 bytes");
+    f = f + check(ok: pair.s().hasBufferedInput(), what: "state: the rest of the record is buffered");
+    FixedArray<uint8> rest = FixedArray.make(size: 64);
+    Result<isize, IoError> more = pair.s().read(into: rest.viewMut());
+    bool all = match (more) { case Ok(value: n): n == hello.length() - 5; case Err(error: e): false; };
+    f = f + check(ok: all, what: "state: the next read answers the rest");
+    f = f + check(ok: !pair.s().hasBufferedInput(), what: "state: nothing is buffered after it");
+    return f;
+}
+
+fn int32 identityTests() {
+    int32 f = 0;
+    f = f + stepTests();
+    f = f + systemTests();
+    f = f + sessionStateTests();
+    return f;
+}

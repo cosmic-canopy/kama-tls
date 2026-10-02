@@ -1,6 +1,7 @@
 // An in-memory, always non-blocking stream pair: what one end writes, the other reads. Both TLS endpoints of a
 // test run in one thread over it — no socket, no port, no timing — and an end can be shut to model a peer
-// that vanished without a close_notify, or damage what it sent to model a corrupted record.
+// that vanished without a close_notify, damage what it sent to model a corrupted record, or refuse writes to
+// model a full socket buffer.
 import { std::io::IoError, std::io::IoErrorKind, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
          std::collections::DynamicArray, std::memory::Shared };
 export { PipeEnd, pipePair };
@@ -50,19 +51,23 @@ type resource Wires {
 type resource PipeEnd implements ReliableStream {
     Shared<Wires> wires;
     bool isA = false;
+    bool writesBlocked = false;
     friend tls_tests::pipePair[make];
-    ctor make(Shared<Wires> wires, bool isA) { this.wires = give wires; this.isA = isA; }
+    ctor make(Shared<Wires> wires, bool isA) { this.wires = give wires; this.isA = isA; this.writesBlocked = false; }
     public fn Result<isize, IoError> read(View<uint8> into) {
         isize n = this.wires.receive(atA: this.isA, into: into);
         if (n < 0) { return Result::Err(error: IoError.of(kind: IoErrorKind::WouldBlock)); }
         return Result::Ok(value: n);
     }
     public fn Result<isize, IoError> write(ConstView<uint8> bytes) {
+        if (this.writesBlocked) { return Result::Err(error: IoError.of(kind: IoErrorKind::WouldBlock)); }
         this.wires.send(fromA: this.isA, b: bytes);
         return Result::Ok(value: bytes.length());
     }
     public fn Result<Unit, IoError> flush() { return Result::Ok(value: Unit::Unit); }
     public fn Result<Unit, IoError> setNonBlocking(bool on) { return Result::Ok(value: Unit::Unit); }
+    // While on, every write answers WouldBlock, as a socket whose send buffer is full does.
+    public fn void blockWrites(bool on) { this.writesBlocked = on; }
     // The peer reads end of stream once it has drained what was sent: a vanished peer, as TCP shows it.
     public fn void shut() { this.wires.close(fromA: this.isA); }
     // The last byte this end sent and the peer has not read yet arrives damaged: a record that will not authenticate.

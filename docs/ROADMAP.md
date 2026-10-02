@@ -5,8 +5,8 @@ arm64 and Linux aarch64. The package is ported to kama 0.9.519, which has the ne
 every gap this package filed (KTLS-1 to KTLS-3), and it now needs that compiler. Phase 3 is under way:
 `@kama/postgres` phase 6 needs, in order, failures in words (alerts, keys, `reason()`) and the RFC 5929 fix
 (done); chain verification without SNI and certificate names, parsed from a session or a file (done); CRLs with OpenSSL's
-check-all rule (done); whether the server asked for a client certificate (done); a step-wise identity; and, last, key export
-for `sslkeylogfile`.
+check-all rule (done); whether the server asked for a client certificate (done); a step-wise identity (done); and, last, key
+export for `sslkeylogfile`.
 
 | # | phase | state |
 |---|---|---|
@@ -29,5 +29,8 @@ Windows is out of scope for 0.1.0: threading there needs `MBEDTLS_THREADING_ALT`
   MAC instead of `certificate_required`. OpenSSL switches at its own Finished. This matters only when this package
   is the server; as a client it reads an OpenSSL server's alert. Under TLS 1.2, Mbed TLS sends no alert for a
   missing client certificate.
+- **`mbedtls_pk_check_pair` is not used.** In TF-PSA-Crypto 1.2.0 it compares cached public halves, and a parsed
+  RSA private key has none, so it refuses every RSA pair. ktls compares the public key it exports through PSA
+  instead (`ktls_pair_matches`). Worth reporting upstream; drop the workaround when a release fixes it.
 - **`trustSystem()` reads a CA bundle file**, not the Windows certificate store or the macOS keychain. On macOS
   that is `/etc/ssl/cert.pem`, which Apple maintains; `SSL_CERT_FILE` overrides it, as with OpenSSL.

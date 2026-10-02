@@ -40,6 +40,8 @@ extern fn usize ktls_alpn(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_ciphersuite(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn int32 ktls_protocol(UnsafePtr s);
 extern fn int32 ktls_cert_requested(UnsafePtr s);
+extern fn usize ktls_in_pending(UnsafePtr s);
+extern fn int32 ktls_key_bits(UnsafePtr s);
 extern fn usize ktls_sni(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
 
@@ -240,6 +242,18 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         if (v == 772) { return Optional::Some(value: TlsVersion::Tls13); }
         return Optional::None;
     }
+
+    // The negotiated cipher's key size in bits (128 for AES-128-GCM, 256 for AES-256-GCM and ChaCha20); 0 before
+    // the handshake completes.
+    public unsafe const fn isize keyBits() { return cast<isize>(ktls_key_bits(s: this.session)); }
+
+    // Ciphertext a write or the handshake produced that the transport has not taken yet: a non-blocking caller
+    // that sees this must `flush()` (waiting until the transport is writable) before it waits for an answer.
+    public unsafe const fn bool hasPendingOutput() { return ktls_out_pending(s: this.session) > 0; }
+
+    // Received bytes a `read` would answer without touching the transport: decrypted plaintext the last read
+    // did not take, or ciphertext fed but not yet decrypted. A non-blocking caller reads these before it waits.
+    public unsafe const fn bool hasBufferedInput() { return ktls_in_pending(s: this.session) > 0; }
 
     // A client: whether the server asked for a certificate during the handshake (a CertificateRequest), whether
     // or not this side had one to send. libpq's sslcertmode=require refuses a server that did not.

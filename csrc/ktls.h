@@ -27,6 +27,7 @@ size_t ktls_strlen(const uint8_t *s);
 #define KTLS_ERR_INPUT   (-5)  /* an argument out of range (too many ALPN names, an empty one, …) */
 #define KTLS_ERR_NOTRUST (-6)  /* a session that must verify its peer has no trust roots to verify against */
 #define KTLS_TRUNCATED   (-7)  /* the transport ended without close_notify: a truncation, not an orderly end */
+#define KTLS_ERR_KEY_MISMATCH (-8)  /* the private key does not pair with the certificate */
 
 /* ---- configuration: one per role, shared by every session made from it ---------------------------------
    Reference-counted with an atomic count, so a configuration (and Mbed TLS's ssl_config inside it, which is
@@ -43,7 +44,12 @@ void ktls_config_release(ktls_config *c);               /* frees on the last rel
 int32_t ktls_config_verify(ktls_config *c, int32_t mode);
 int32_t ktls_config_trust_file(ktls_config *c, const char *path);   /* a PEM or DER file of CA certificates */
 int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len);
-/* This side's certificate chain and private key: PEM files, or PEM bytes. `password` may be NULL / empty. */
+/* This side's identity, in two steps so a failure says which: the certificate chain (PEM or DER; the first
+   certificate is this side's), then the private key (PEM or DER, decrypted with `password` when it has length),
+   which must pair with that certificate (KTLS_ERR_KEY_MISMATCH). One identity per configuration. */
+int32_t ktls_config_certificate_chain(ktls_config *c, const uint8_t *data, size_t len);
+int32_t ktls_config_private_key(ktls_config *c, const uint8_t *data, size_t len, const uint8_t *password, size_t password_len);
+/* Both steps at once: from files, or from bytes. `password` may be NULL / empty. */
 int32_t ktls_config_identity_files(ktls_config *c, const char *cert, const char *key, const char *password);
 int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cert_len,
                                  const uint8_t *key, size_t key_len, const uint8_t *password, size_t password_len);
@@ -107,6 +113,8 @@ size_t ktls_alpn(const ktls_session *s, uint8_t *buf, size_t cap);        /* 0 w
 size_t ktls_ciphersuite(const ktls_session *s, uint8_t *buf, size_t cap);
 int32_t ktls_protocol(const ktls_session *s);                             /* 0x0303 / 0x0304; 0 before */
 int32_t ktls_cert_requested(const ktls_session *s);  /* a client: 1 once the server has asked for a certificate */
+size_t ktls_in_pending(const ktls_session *s);       /* received bytes a read would answer without the transport */
+int32_t ktls_key_bits(const ktls_session *s);        /* the negotiated cipher's key size in bits; 0 before */
 size_t ktls_sni(const ktls_session *s, uint8_t *buf, size_t cap);          /* a server: the SNI received; 0 if none */
 
 /* ---- a certificate on its own ----------------------------------------------------------------------------

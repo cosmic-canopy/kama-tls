@@ -22,6 +22,9 @@ extern fn int32 ktls_config_identity_files(UnsafePtr c, UnsafeConstPtr<cchar> ce
 extern fn int32 ktls_config_identity_pem(UnsafePtr c, UnsafeConstPtr<uint8> cert, usize cert_len,
                                          UnsafeConstPtr<uint8> key, usize key_len,
                                          UnsafeConstPtr<uint8> password, usize password_len);
+extern fn int32 ktls_config_certificate_chain(UnsafePtr c, UnsafeConstPtr<uint8> data, usize len);
+extern fn int32 ktls_config_private_key(UnsafePtr c, UnsafeConstPtr<uint8> data, usize len, UnsafeConstPtr<uint8> password,
+                                        usize password_len);
 extern fn int32 ktls_config_alpn(UnsafePtr c, UnsafeConstPtr<uint8> protocol, usize len);
 extern fn int32 ktls_config_versions(UnsafePtr c, int32 min, int32 max);
 extern fn int32 ktls_config_trust_count(UnsafePtr c);
@@ -129,6 +132,13 @@ type resource TlsConfig implements Sendable {
     // trusted afterwards. Windows' certificate store is not read.
     public unsafe fn Result<isize, TlsError> trustSystem() {
         Optional<string> named = env(name: "SSL_CERT_FILE");
+        return this.trustSystemWith(certFile: give named);
+    }
+
+    // `trustSystem()` with SSL_CERT_FILE's value supplied by the caller (which may keep its own environment):
+    // `Some(path)` trusts that file, `None` the first CA bundle found among the usual places.
+    public unsafe fn Result<isize, TlsError> trustSystemWith(Optional<string> certFile) {
+        Optional<string> named = give certFile;
         string chosen = "";
         match (give named) {
             case Some(value: p): { chosen = give p; }
@@ -149,6 +159,20 @@ type resource TlsConfig implements Sendable {
             case Ok(value: u): Result::Ok(value: this.trustCount());
             case Err(error: e): Result::Err(error: give e);
         };
+    }
+
+    // This side's certificate chain, PEM or DER: the first certificate is this side's, the rest its chain. The
+    // first step of an identity, so a failure here is the certificate's; `privateKey` is the second.
+    public unsafe fn Result<Unit, TlsError> certificateChain(ConstView<uint8> bytes) {
+        return checked(rc: ktls_config_certificate_chain(c: this.handle, data: bytes.dataPtr(), len: cast<usize>(bytes.length())));
+    }
+
+    // The private key for the chain `certificateChain` loaded, PEM or DER, decrypted with `password` when it is not
+    // empty. It must pair with the chain's first certificate: a key that does not is a `Config` error with code
+    // -8. Only then does the configuration have an identity.
+    public unsafe fn Result<Unit, TlsError> privateKey(ConstView<uint8> bytes, ConstView<uint8> password) {
+        return checked(rc: ktls_config_private_key(c: this.handle, data: bytes.dataPtr(), len: cast<usize>(bytes.length()),
+                                                   password: password.dataPtr(), password_len: cast<usize>(password.length())));
     }
 
     // This side's certificate chain and private key, from PEM files. `password` decrypts an encrypted key;
