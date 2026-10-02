@@ -6,7 +6,7 @@ or an in-memory pipe — and it is itself a `ReliableStream`, so a protocol writ
 over TLS unchanged. The first consumer is [`@kama/postgres`](https://github.com/cosmic-canopy/kama-postgres).
 
 > **Status: not yet published.** `TlsStream` and `TlsConfig` work and are tested on macOS and Linux;
-> `@kama/postgres` exercising them is next (see [docs/ROADMAP.md](docs/ROADMAP.md)). Needs **kama ≥ 0.9.486**.
+> `@kama/postgres` exercising them is next (see [docs/ROADMAP.md](docs/ROADMAP.md)). Needs **kama ≥ 0.9.519**.
 
 ## Using it
 
@@ -34,7 +34,10 @@ another handle). After the handshake: `protocolVersion()`, `cipherSuite()`, `alp
 
 A failed handshake says why as data: `TlsError::Certificate(flags, reasons)` names every check the peer's
 certificate failed ("The certificate validity has expired", "The certificate Common Name (CN) does not match…").
-A peer that vanishes without a close_notify reads as `IoError::UnexpectedEof`, never as an orderly end.
+A read or write that fails in the TLS engine rather than the transport answers an `Other` `IoError`, and
+`tlsError()` says why as a `TlsError`: a certificate rejected by a handshake that a read ran, an alert, or a
+record that did not authenticate (`TlsError::Session`). A peer that vanishes without a close_notify reads as an
+`UnexpectedEof` `IoError`, never as an orderly end.
 
 ## What is vendored, and why
 

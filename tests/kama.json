@@ -2,7 +2,7 @@
   "name": "tls_tests",
   "version": "0.1.0",
   "kind": "executable",
-  "kama": ">=0.9.486",
+  "kama": ">=0.9.519",
   "entry": "src/main.kama",
   "dependencies": { "@kama/tls": { "path": ".." } },
   "modules": { ".": { "visibility": "internal" } }

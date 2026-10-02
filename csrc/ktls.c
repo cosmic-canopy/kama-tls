@@ -473,7 +473,7 @@ int32_t ktls_protocol(const ktls_session *s)
 
 /* Every code src/stream.kama and src/config.kama spell as a literal, pinned here: an upgrade that changed
    one fails to compile with the name, rather than misreading an error at run time. */
-_Static_assert(KTLS_WANT_READ == -1 && KTLS_CLOSED == -2 && KTLS_TRUNCATED == -7, "stream.kama wantRead / closedByPeer / truncated");
+_Static_assert(KTLS_WANT_READ == -1 && KTLS_CLOSED == -2 && KTLS_TRUNCATED == -7, "stream.kama WANT_READ / CLOSED / TRUNCATED");
 _Static_assert(MBEDTLS_ERR_X509_CERT_VERIFY_FAILED == -9984, "stream.kama CERT_VERIFY_FAILED");
 _Static_assert(MBEDTLS_SSL_VERSION_TLS1_2 == 771 && MBEDTLS_SSL_VERSION_TLS1_3 == 772, "TLS version numbers");
 _Static_assert(KTLS_ERR_NOMEM == -3 && KTLS_ERR_INPUT == -5, "config.kama error codes");

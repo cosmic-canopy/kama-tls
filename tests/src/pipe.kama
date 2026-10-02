@@ -1,7 +1,7 @@
 // An in-memory, always non-blocking stream pair: what one end writes, the other reads. Both TLS endpoints of a
 // test run in one thread over it — no socket, no port, no timing — and an end can be shut to model a peer
-// that vanished without a close_notify.
-import { std::io::IoError, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
+// that vanished without a close_notify, or damage what it sent to model a corrupted record.
+import { std::io::IoError, std::io::IoErrorKind, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
          std::collections::DynamicArray, std::memory::Shared };
 export { PipeEnd, pipePair };
 
@@ -30,6 +30,11 @@ type resource Queue {
         return n;
     }
     public fn void close() { this.shut = true; }
+    // Flip the low bit of the last byte waiting to be read, if there is one.
+    public fn void garble() {
+        isize last = this.bytes.length() - 1;
+        if (last >= this.head) { this.bytes[last] = this.bytes[last] ^ 1ui8; }
+    }
 }
 
 type resource Wires {
@@ -39,6 +44,7 @@ type resource Wires {
     public fn void send(bool fromA, ConstView<uint8> b) { if (fromA) { this.ab.push(b: b); } else { this.ba.push(b: b); } }
     public fn isize receive(bool atA, View<uint8> into) { if (atA) { return this.ba.pull(into: into); } return this.ab.pull(into: into); }
     public fn void close(bool fromA) { if (fromA) { this.ab.close(); } else { this.ba.close(); } }
+    public fn void garble(bool fromA) { if (fromA) { this.ab.garble(); } else { this.ba.garble(); } }
 }
 
 type resource PipeEnd implements ReliableStream {
@@ -48,7 +54,7 @@ type resource PipeEnd implements ReliableStream {
     ctor make(Shared<Wires> wires, bool isA) { this.wires = give wires; this.isA = isA; }
     public fn Result<isize, IoError> read(View<uint8> into) {
         isize n = this.wires.receive(atA: this.isA, into: into);
-        if (n < 0) { return Result::Err(error: IoError::WouldBlock); }
+        if (n < 0) { return Result::Err(error: IoError.of(kind: IoErrorKind::WouldBlock)); }
         return Result::Ok(value: n);
     }
     public fn Result<isize, IoError> write(ConstView<uint8> bytes) {
@@ -59,6 +65,8 @@ type resource PipeEnd implements ReliableStream {
     public fn Result<Unit, IoError> setNonBlocking(bool on) { return Result::Ok(value: Unit::Unit); }
     // The peer reads end of stream once it has drained what was sent: a vanished peer, as TCP shows it.
     public fn void shut() { this.wires.close(fromA: this.isA); }
+    // The last byte this end sent and the peer has not read yet arrives damaged: a record that will not authenticate.
+    public fn void garble() { this.wires.garble(fromA: this.isA); }
     ~PipeEnd() { this.wires.close(fromA: this.isA); }
 }
 

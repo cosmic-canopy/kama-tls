@@ -1,7 +1,9 @@
 # Roadmap
 
-Where this is, 2026-09-30: `TlsConfig` and `TlsStream<S>` are done and tested, debug and release, on macOS
-arm64 and Linux aarch64. Next, `@kama/postgres` uses them against PostgreSQL 14–19.
+Where this is, 2026-10-02: `TlsConfig` and `TlsStream<S>` are done and tested, debug and release, on macOS
+arm64 and Linux aarch64. The package is ported to kama 0.9.519, which has the new `IoError` and fixes for
+every gap this package filed (KTLS-1 to KTLS-3), and it now needs that compiler. Next, `@kama/postgres` uses
+it against PostgreSQL 14–19.
 
 | # | phase | state |
 |---|---|---|

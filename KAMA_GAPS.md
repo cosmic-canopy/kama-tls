@@ -5,7 +5,8 @@ project**: each entry is reduced to the smallest program that shows it, and each
 version named, never inferred from the spec. This file is excluded from the published package, as it is
 in `@kama/sodium` and `@kama/postgres`. Gaps hit by postgres are in `../kama-postgres/KAMA_GAPS.md`.
 
-**Current compiler:** `kama 0.9.486+gea6cae46`, the dev build at `../cstar/out/Darwin-arm64/kama`.
+**Current compiler:** `kama 0.9.519+g28136440`, the dev build at `../cstar/out/Darwin-arm64/kama`. KTLS-1 to KTLS-3
+were re-run on it, each with the repro as filed, before moving to FIXED. They were filed against `0.9.486`.
 
 **Priorities:**
 - **HIGH:** wrong or dangerous behaviour, or a permanent bad publish.
@@ -20,125 +21,34 @@ deleted when the gap closes.
 
 ## OPEN
 
-### KTLS-1 · MED · A file-private `comptime` constant used by a generic type is missing from the C when another package instantiates it
-
-**Status:** open. Reproduces on 0.9.486.
-
-**Symptom.** `kama check` passes. `kama build` then fails in clang with "use of undeclared identifier".
-The constant is emitted only when it is exported, or (presumably) when the defining package instantiates
-the type itself. File-private **functions** used the same way are emitted fine, so only constants are
-affected.
-
-**Repro.** A library `glib` and an executable that path-depends on it:
-
-```kama
-// glib/src/glib.kama
-export { Box };
-
-comptime int32 LIMIT = 7;
-
-type resource Box<T> {
-    T v;
-    public ctor make(T v) { this.v = give v; }
-    public fn int32 limit() { return LIMIT; }
-}
-```
-
-```kama
-// app/src/main.kama
-import { glib::Box };
-fn int32 main() { Box<int32> b = Box::<int32>.make(v: 1); return b.limit(); }
-```
-
-```
-$ kama check app/kama.json
-kama: app/src/main.kama OK (2 units analyzed)
-$ kama build app/kama.json -o app/a
-app/.kama/deps/glib/src/glib.kama:8:18: error: use of undeclared identifier 'glib__k_Fglib__LIMIT'
-```
-
-With `export { Box, LIMIT };` the same program builds and exits 7.
-
-**Impact.** `TlsStream<S>` is generic over its transport, so every constant its methods use (the engine's
-result codes, the record-sized chunk) hit this as soon as the tests instantiated it.
-
-**Workaround here.** `src/stream.kama` spells those constants as file-private functions (`wantRead()`,
-`chunk()`, …) rather than `comptime` values. Exporting them would also work, but it would put engine
-internals on the package's public surface.
-
-**Suggested fix.** When a generic body is instantiated in another package, emit (or reference) the
-defining file's `comptime` constants it uses, as is already done for its file-private functions. A `check`
-pass that walks the instantiation would also have caught this before clang.
-
----
-
-### KTLS-2 · MED · Indexing a view that a call returns passes `check` and fails in clang
-
-**Status:** open. Reproduces on 0.9.486.
-
-**Repro:**
-
-```kama
-// Indexing a view returned by a call, without binding it first.
-import { std::collections::ConstView };
-
-fn uint8 second(const ref string s) { return s.bytes()[1]; }
-
-fn int32 main() {
-    string s = "abc";
-    return cast<int32>(second(s: s));
-}
-```
-
-```
-$ kama check viewindex.kama
-kama: viewindex.kama OK (4 units analyzed)
-$ kama build viewindex.kama -o viewindex
-viewindex.kama:4:64: error: cannot take the address of an rvalue of type 'std__collections__ConstView_uint8'
-```
-
-The emitted C passes `&(kama_string__bytes(...))` to `ConstView_uint8__op_index`. This is the same family as
-`@kama/sodium`'s gap #3 (`addr(of: f.view()[0])`, fixed in 0.9.229 as a kama diagnostic), but for a plain
-index rather than `addr(of:)`.
-
-**Workaround here.** Bind the view first, or take it as a by-value `ConstView` parameter; the tests do the
-latter. **Hit again in `@kama/postgres`** (its unit tests index `RowValues.value(column:)` directly), with the
-same workaround there. Every accessor that hands back a view invites this spelling, so it will keep coming
-up. Note that `.length()` on the same call result compiles fine (it is emitted through a compound literal),
-which makes the indexing failure more surprising.
-
-**Suggested fix.** Materialise the call result into a temporary before indexing it, or reject the
-expression in `check` with a "bind it to a local first" message, as was done for `addr(of:)`.
-
----
-
-### KTLS-3 · LOW · Without `ConstView` imported, `s.bytes()` reports "`kama_string` has no method `bytes`"
-
-**Status:** open. Reproduces on 0.9.486.
-
-```kama
-fn int32 main() {
-    string s = "abc";
-    uint8 b = s.bytes()[1];
-    return cast<int32>(b);
-}
-```
-
-```
-viewindex.kama:4:0: error: `kama_string` has no method `bytes`
-```
-
-The method exists. What is missing is the import of its return type, `std::collections::ConstView`. The
-message names the type by its C spelling (`kama_string`), not `string`, and points at the wrong cause.
-
-**Suggested fix.** Say that `string.bytes()` returns `std::collections::ConstView<uint8>`, which this file
-does not import, and name the type `string`.
+None.
 
 ---
 
 ## FIXED — kept for the record
 
-Nothing yet.
+All three were filed against 0.9.486 and verified fixed on 0.9.519 with the repro as filed. Each workaround is
+gone from this package.
+
+### KTLS-1 · MED · A file-private `comptime` constant used by a generic type was missing from the C when another package instantiated it — FIXED in 0.9.488
+
+Fixed by cstar `efa8220c`: a private `comptime` that a generic body reads is defined in the header. The repro
+builds and exits 7 without exporting `LIMIT`. `src/stream.kama` spells the engine's result codes and the
+record-sized chunk as `comptime` constants again (`WANT_READ`, `CLOSED`, `TRUNCATED`, `CERT_VERIFY_FAILED`,
+`CHUNK`), and the tests instantiate `TlsStream<PipeEnd>` and `TlsStream<TcpStream>` from another package.
+
+### KTLS-2 · MED · Indexing a view that a call returned passed `check` and failed in clang — FIXED in 0.9.489
+
+Fixed by cstar `5d5c47ad`: an indexed value is held in a temporary. The repro builds and exits 98 (`'b'`). The
+tests' `carries` takes the message as a `const ref string` again and indexes `msg.bytes()[got + i]` directly.
+
+### KTLS-3 · LOW · Without `ConstView` imported, `s.bytes()` reported "`kama_string` has no method `bytes`" — FIXED in 0.9.490
+
+Fixed by cstar `9a69fc30`. The repro now says:
+
+```
+noimport.kama:3:0: error: `string.bytes()` returns a `ConstView<uint8>`, and this program has no `std::collections::ConstView` — add `import { std::collections::ConstView };`
+```
 
 ---
 

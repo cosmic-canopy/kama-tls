@@ -6,7 +6,8 @@ import { core::println, core::env, std::io::IoError, std::io::writeAll, std::col
          std::encoding::base64::DecodeError, std::digest::sha256::sha256,
          tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
          tls_tests::check, tls_tests::PipeEnd, tls_tests::pipePair };
-export { handshakeTests, certPath, serverConfig, clientConfig, connect, drive, completed, describe, carries, Session, Outcome };
+export { handshakeTests, certPath, serverConfig, clientConfig, connect, drive, completed, describe, carries, Session, Outcome,
+         BADCERT_CN_MISMATCH };
 
 // MBEDTLS_X509_BADCERT_* bits a rejection is expected to carry.
 comptime uint32 BADCERT_EXPIRED = 1ui32;
@@ -87,10 +88,9 @@ fn bool rejectedWith(const ref Outcome o, uint32 want) {
     };
 }
 
-// Write `msg` on one side and read exactly it back on the other. (`msg` is a view parameter rather than a
-// string so that indexing it is legal C — KAMA_GAPS.md, KTLS-2.)
-fn bool carries(ref TlsStream<PipeEnd> from, ref TlsStream<PipeEnd> to, ConstView<uint8> msg) {
-    Result<Unit, IoError> w = writeAll(w: from, bytes: msg);
+// Write `msg` on one side and read exactly it back on the other.
+fn bool carries(ref TlsStream<PipeEnd> from, ref TlsStream<PipeEnd> to, const ref string msg) {
+    Result<Unit, IoError> w = writeAll(w: from, bytes: msg.bytes());
     match (w) { case Ok(value: u): { } case Err(error: e): { return false; } };
     FixedArray<uint8> buf = FixedArray.make(size: 4096);
     isize got = 0;
@@ -100,7 +100,7 @@ fn bool carries(ref TlsStream<PipeEnd> from, ref TlsStream<PipeEnd> to, ConstVie
         if (n <= 0) { return false; }
         isize i = 0;
         while (i < n) {
-            if (buf[i] != msg[got + i]) { return false; }
+            if (buf[i] != msg.bytes()[got + i]) { return false; }
             i = i + 1;
         }
         got = got + n;

@@ -12,7 +12,7 @@ export { TlsError, TlsVersion, Verify, Progress, ready, version, errorText };
 //
 // The rules every module holds:
 //   - Kama does all the socket I/O. Mbed TLS reads and writes memory buffers (a memory BIO), and kama moves
-//     those bytes over S. So TLS never touches a descriptor, a would-block is kama's `IoError::WouldBlock`,
+//     those bytes over S. So TLS never touches a descriptor, a would-block is kama's `WouldBlock` IoError,
 //     and a handshake can be tested in one thread with no network at all.
 //   - Verification is on unless it is turned off by name: a client verifies the chain AND the server name by
 //     default, and refuses to start without trust roots rather than trusting everything.
@@ -38,6 +38,8 @@ type enum TlsError implements Error {
     // The handshake failed for any other reason: no common version or cipher, an alert from the peer, a
     // malformed message.
     Handshake(int32 code, string detail),
+    // The session failed after its handshake: an alert from the peer, a record that did not authenticate.
+    Session(int32 code, string detail),
     // The transport under the session failed.
     Io(IoError error),
     // The transport ended before the handshake finished.
@@ -49,6 +51,7 @@ type enum TlsError implements Error {
             case Config(code: c, detail: d): "TLS configuration: ${d}";
             case Certificate(flags: f, reasons: r): "the peer's certificate was rejected: ${r}";
             case Handshake(code: c, detail: d): "TLS handshake failed: ${d}";
+            case Session(code: c, detail: d): "TLS session failed: ${d}";
             case Io(error: e): "TLS transport: ".concat(other: e.message());
             case Closed: "the connection closed during the TLS handshake";
         };
@@ -83,9 +86,8 @@ unsafe fn string version() {
     return kama_string_from_raw(src: v, start: 0, len: cast<isize>(ktls_strlen(s: v)));
 }
 
-// The text for an error code this package produced: an Mbed TLS error, or one of its own. A `TlsStream`
-// read or write that fails in the TLS engine (not in the transport) answers `IoError::Other(code)` with one of
-// these codes — always negative, where an operating-system error number never is.
+// The text for an error code this package produced: an Mbed TLS error, or one of its own. Every code a
+// `TlsError` carries is one of these, and always negative.
 unsafe fn string errorText(int32 code) {
     FixedArray<uint8> buf = FixedArray.make(size: 256);
     isize len = cast<isize>(ktls_error_text(code: code, buf: buf.dataPtrMut(), cap: 256));

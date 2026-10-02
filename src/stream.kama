@@ -1,4 +1,4 @@
-import { std::io::IoError, std::io::Reader, std::io::Writer, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
+import { std::io::IoError, std::io::IoErrorKind, std::io::Reader, std::io::Writer, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
          std::collections::FixedArray, std::collections::DynamicArray,
          tls::TlsError, tls::TlsConfig, tls::TlsVersion, tls::Progress, tls::errorText };
 export { TlsStream };
@@ -8,13 +8,14 @@ export { TlsStream };
 //
 // The engine works on memory: ciphertext the peer sent is fed in, ciphertext for the peer is drained out, and
 // every byte crosses the transport through `inner.read` / `inner.write`. Over a blocking transport each call
-// blocks like the transport does. Over a non-blocking one a call answers `IoError::WouldBlock` (or
+// blocks like the transport does. Over a non-blocking one a call answers a `WouldBlock` error (or
 // `Progress::WantRead`/`WantWrite` from `handshake()`); poll the transport's descriptor and call again.
 //
-// A read or write that fails in the TLS engine, rather than the transport, answers `IoError::Other(code)` with
-// the engine's negative error code; `errorText(code:)` says what it was. A peer that closes the transport
-// without a close_notify is `IoError::UnexpectedEof` — truncation, not an orderly end — and an orderly end
-// (close_notify) reads as 0 bytes, like end of file.
+// A read or write that fails in the TLS engine, rather than the transport, answers an `Other` error, and
+// `tlsError()` says why as a `TlsError`: the certificate a handshake run by that call rejected, an alert from
+// the peer, a record that did not authenticate. A transport failure is the transport's own `IoError`, as it
+// reported it. A peer that closes the transport without a close_notify is `UnexpectedEof` — truncation, not an
+// orderly end — and an orderly end (close_notify) reads as 0 bytes, like end of file.
 
 extern "ktls.h";
 extern fn UnsafePtr ktls_session_new(UnsafePtr c, UnsafeConstPtr<cchar> server_name, UnsafePtr<int32> err);
@@ -38,27 +39,23 @@ extern fn int32 ktls_protocol(UnsafePtr s);
 extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
 
 // The engine's own answers (csrc/ktls.h) and the one Mbed TLS code this file tells apart, each pinned by a
-// _Static_assert in csrc/ktls.c. Spelled as functions, not `comptime` values: a file-private constant used by
-// this generic type is missing from the C when another package instantiates it (KAMA_GAPS.md, KTLS-1).
-fn int32 wantRead() { return -1; }              // KTLS_WANT_READ
-fn int32 closedByPeer() { return -2; }          // KTLS_CLOSED: close_notify received
-fn int32 truncated() { return -7; }             // KTLS_TRUNCATED: the transport ended without close_notify
-fn int32 certVerifyFailed() { return -9984; }   // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED (-0x2700)
+// _Static_assert in csrc/ktls.c.
+comptime int32 WANT_READ = -1;               // KTLS_WANT_READ
+comptime int32 CLOSED = -2;                  // KTLS_CLOSED: close_notify received
+comptime int32 TRUNCATED = -7;               // KTLS_TRUNCATED: the transport ended without close_notify
+comptime int32 CERT_VERIFY_FAILED = -9984;   // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED (-0x2700)
 // The transport is read and written in pieces of this size: one full TLS record and its overhead.
-fn isize chunk() { return 17408; }
+comptime isize CHUNK = 17408;
 
-fn bool isWouldBlock(const ref IoError e) { return match (e) { case WouldBlock: true; case _: false; }; }
+fn bool isWouldBlock(const ref IoError e) { return match (e.kind()) { case WouldBlock: true; case _: false; }; }
 
 // A handshake error as the `IoError` a read or write that ran the handshake reports: the transport's own
-// error, end of stream, or the engine's code as `Other(code)` (see `errorText`).
+// error, end of stream, or `Other` for the engine's failure, which `failure` has recorded for `tlsError()`.
 fn IoError ioErrorOf(const ref TlsError e) {
     return match (e) {
         case Io(error: x): x;
-        case Closed: IoError::UnexpectedEof;
-        case Certificate(flags: f, reasons: r): IoError::Other(code: certVerifyFailed());
-        case Handshake(code: c, detail: d): IoError::Other(code: c);
-        case Config(code: c, detail: d): IoError::Other(code: c);
-        case CryptoInit(status: st): IoError::Other(code: st);
+        case Closed: IoError.of(kind: IoErrorKind::UnexpectedEof);
+        case _: IoError.of(kind: IoErrorKind::Other);
     };
 }
 
@@ -68,13 +65,15 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
     FixedArray<uint8> scratch;   // transport bytes in transit, either direction
     bool established = false;
     bool finished = false;       // the peer sent close_notify
+    int32 failedWith = 0;        // the engine's code for its last failure, for `tlsError()`; 0 while it has none
 
     unsafe ctor adopt(S inner, UnsafePtr session) {
         this.inner = give inner;
         this.session = session;
-        this.scratch = FixedArray.make(size: chunk());
+        this.scratch = FixedArray.make(size: CHUNK);
         this.established = false;
         this.finished = false;
+        this.failedWith = 0;
     }
 
     // A client session over `inner`. `serverName` is sent as SNI and, under `Verify::Full`, is the name the
@@ -116,7 +115,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
                 this.established = true;
                 return Result::Ok(value: Progress::Done);
             }
-            if (rc != wantRead()) { return Result::Err(error: this.failure(code: rc)); }
+            if (rc != WANT_READ) { return Result::Err(error: this.failure(code: rc)); }
             if (!allOut) { return Result::Ok(value: Progress::WantWrite); }
             Result<isize, IoError> pulled = this.pullIn();
             match (pulled) {
@@ -144,9 +143,9 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
             // A read can make the engine answer too (a TLS 1.3 key update, an alert); send it on.
             Result<bool, IoError> pushed = this.pushOut();
             match (pushed) { case Ok(value: v): { } case Err(error: e): { return Result::Err(error: e); } };
-            if (rc == closedByPeer()) { this.finished = true; return Result::Ok(value: 0); }
-            if (rc == truncated()) { return Result::Err(error: IoError::UnexpectedEof); }
-            if (rc != wantRead()) { return Result::Err(error: IoError::Other(code: rc)); }
+            if (rc == CLOSED) { this.finished = true; return Result::Ok(value: 0); }
+            if (rc == TRUNCATED) { return Result::Err(error: IoError.of(kind: IoErrorKind::UnexpectedEof)); }
+            if (rc != WANT_READ) { return Result::Err(error: this.engineFailed(code: rc)); }
             Result<isize, IoError> pulled = this.pullIn();
             match (pulled) {
                 case Ok(value: n): { }   // more ciphertext, or end of transport: the engine sees it next turn
@@ -164,7 +163,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         Result<Unit, IoError> up = this.ensureHandshake();
         match (up) { case Ok(value: u): { } case Err(error: e): { return Result::Err(error: e); } };
         int32 rc = ktls_write(s: this.session, buf: bytes.dataPtr(), len: cast<usize>(bytes.length()));
-        if (rc < 0) { return Result::Err(error: IoError::Other(code: rc)); }
+        if (rc < 0) { return Result::Err(error: this.engineFailed(code: rc)); }
         Result<bool, IoError> pushed = this.pushOut();
         match (pushed) { case Ok(value: v): { } case Err(error: e): { return Result::Err(error: e); } };
         return Result::Ok(value: cast<isize>(rc));
@@ -175,7 +174,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         Result<bool, IoError> pushed = this.pushOut();
         bool allOut = false;
         match (pushed) { case Ok(value: v): { allOut = v; } case Err(error: e): { return Result::Err(error: e); } };
-        if (!allOut) { return Result::Err(error: IoError::WouldBlock); }
+        if (!allOut) { return Result::Err(error: IoError.of(kind: IoErrorKind::WouldBlock)); }
         return this.inner.flush();
     }
 
@@ -186,7 +185,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
     // transport stays open until this stream drops.
     public unsafe fn Result<Unit, TlsError> close() {
         int32 rc = ktls_close_notify(s: this.session);
-        if (rc < 0 && rc != wantRead()) { return Result::Err(error: TlsError::Handshake(code: rc, detail: errorText(code: rc))); }
+        if (rc < 0 && rc != WANT_READ) { return Result::Err(error: this.failure(code: rc)); }
         Result<Unit, IoError> sent = this.flush();
         return match (sent) {
             case Ok(value: u): Result::Ok(value: Unit::Unit);
@@ -227,6 +226,13 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         return Optional::None;
     }
 
+    // Why the engine failed, the last time it did: what a read, write or flush that answered an `Other` error
+    // means, as `handshake()` would have said it. `None` while the engine has not failed.
+    public unsafe fn Optional<TlsError> tlsError() {
+        if (this.failedWith == 0) { return Optional::None; }
+        return Optional::Some(value: this.explain(code: this.failedWith));
+    }
+
     // The transport under the session — to poll its descriptor, or read its address.
     public const fn const ref S innerRef() { return this.inner; }
     public fn ref S innerRefMut() { return this.inner; }
@@ -244,18 +250,32 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         };
         bool done = match (where) { case Done: true; case _: false; };
         if (done) { return Result::Ok(value: Unit::Unit); }
-        return Result::Err(error: IoError::WouldBlock);
+        return Result::Err(error: IoError.of(kind: IoErrorKind::WouldBlock));
     }
 
-    // A failed handshake as data: a rejected certificate says which checks failed; anything else says why.
+    // The engine failed: remember why, for `tlsError()`, and answer it as data.
     unsafe fn TlsError failure(int32 code) {
+        this.failedWith = code;
+        return this.explain(code: code);
+    }
+
+    // An engine failure as the `IoError` a read, write or flush answers. `tlsError()` says what it was.
+    fn IoError engineFailed(int32 code) {
+        this.failedWith = code;
+        return IoError.of(kind: IoErrorKind::Other);
+    }
+
+    // An engine failure as data: a rejected certificate says which checks failed; anything else says why, and
+    // whether the handshake had finished.
+    unsafe fn TlsError explain(int32 code) {
         uint32 flags = ktls_verify_flags(s: this.session);
-        if (code == certVerifyFailed() && flags != 0ui32) {
+        if (code == CERT_VERIFY_FAILED && flags != 0ui32) {
             FixedArray<uint8> text = FixedArray.make(size: 1024);
             isize n = cast<isize>(ktls_verify_text(flags: flags, buf: text.dataPtrMut(), cap: 1024));
             if (n > 1024) { n = 1024; }
             return TlsError::Certificate(flags: flags, reasons: kama_string_from_raw(src: text.dataPtr(), start: 0, len: n));
         }
+        if (this.established) { return TlsError::Session(code: code, detail: errorText(code: code)); }
         return TlsError::Handshake(code: code, detail: errorText(code: code));
     }
 
@@ -263,7 +283,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
     // would block, and the rest waits for the next call.
     unsafe fn Result<bool, IoError> pushOut() {
         while (ktls_out_pending(s: this.session) > 0) {
-            isize n = cast<isize>(ktls_out_peek(s: this.session, buf: this.scratch.dataPtrMut(), cap: cast<usize>(chunk())));
+            isize n = cast<isize>(ktls_out_peek(s: this.session, buf: this.scratch.dataPtrMut(), cap: cast<usize>(CHUNK)));
             Result<isize, IoError> w = Result::Ok(value: 0);
             borrow this.scratch.view() as pending {
                 w = this.inner.write(bytes: pending.slice(from: 0, count: n));
@@ -289,7 +309,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
             return Result::Ok(value: 0);
         }
         int32 fed = ktls_feed(s: this.session, buf: this.scratch.dataPtr(), len: cast<usize>(n));
-        if (fed != 0) { return Result::Err(error: IoError::Other(code: fed)); }
+        if (fed != 0) { return Result::Err(error: this.engineFailed(code: fed)); }
         return Result::Ok(value: n);
     }
 

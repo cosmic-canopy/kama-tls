@@ -4,7 +4,7 @@ The two generated files carry the general rules: `AGENTS.md` is the language, `A
 a publishable library needs. Both are written by `kama agents install` and are **not** hand-edited. This file
 is the project-specific third, and it is the one to edit.
 
-**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.486**, declared as `"kama"`
+**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.519**, declared as `"kama"`
 in every manifest here. Its first consumer is `@kama/postgres` (`../kama-postgres`). This package is not
 published until postgres has exercised its API, because a registry version is permanent.
 
@@ -37,13 +37,20 @@ published until postgres has exercised its API, because a registry version is pe
   pipe (`tests/src/pipe.kama`), plus one loopback-TCP case with the server in its own isolate.
 - **`mbedtls_ssl_read` returns 0 for a transport that ended WITHOUT close_notify** (its documented contract)
   and `MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY` for an orderly end. `ktls_read` turns those into `KTLS_TRUNCATED`
-  (→ `IoError::UnexpectedEof`) and `KTLS_CLOSED` (→ 0 bytes). Getting this backwards silently turns a
+  (→ an `UnexpectedEof` IoError) and `KTLS_CLOSED` (→ 0 bytes). Getting this backwards silently turns a
   truncation into a clean EOF; the truncation test guards it.
 - **Mbed TLS 4 refuses a verifying client with no hostname.** Chain-only verification (`Verify::Chain`, libpq's
   verify-ca) therefore still sets the name, for SNI, and a verify callback clears only the leaf's
   CN-mismatch flag.
-- **Constants used by the generic `TlsStream<S>` are file-private functions, not `comptime` values**, because
-  of KTLS-1 in KAMA_GAPS.md. Change them back when it is fixed.
+- **An engine failure in a read, write or flush is an `Other` IoError, and the stream keeps its code.** std's
+  `IoError` is a kind plus an OS code, and only std can attach a code, so the engine's cannot ride in it.
+  `TlsStream.tlsError()` rebuilds the `TlsError` from the kept code: `Certificate` or `Handshake` before the
+  handshake finished, `Session` after. A transport failure stays the transport's own `IoError`.
+- **Run the gate with the dev compiler by its full path:** `KAMA=$PWD/../cstar/out/Darwin-arm64/kama tools/test.sh`.
+  The compiler finds std and its runtime headers relative to its own path, so run through `PATH` it fails with
+  `cannot resolve module 'std::fs'`. The Linux aarch64 leg is the same script inside `localhost/kama-dev`
+  (podman), with `../cstar/out/Linux-aarch64/kama` copied to `/k/out/L/kama` and `/k/lib` and `/k/include`
+  linked to cstar's.
 - **Test certificates are generated** into `out/test-certs` by `tools/gen-certs.sh` and never tracked.
   `kama publish` refuses a tracked `*.key` or `*.pem`, and so does the registry.
 - **A gap goes in a `KAMA_GAPS.md` here the moment it is hit**, reduced to a repro and run on the named

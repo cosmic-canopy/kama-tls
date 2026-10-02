@@ -1,11 +1,11 @@
 // What a completed session does: versions, ALPN, client certificates, data in both directions at size, an
 // orderly close against a truncation, and the channel binding SCRAM-SHA-256-PLUS relies on.
-import { core::println, std::io::IoError, std::io::writeAll, std::collections::DynamicArray,
+import { core::println, std::io::IoError, std::io::IoErrorKind, std::io::writeAll, std::collections::DynamicArray,
          std::collections::FixedArray, std::collections::ConstView, std::fs::readText,
          std::encoding::base64::decode as b64decode, std::encoding::base64::DecodeError,
          std::digest::sha256::sha256,
-         tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion,
-         tls_tests::check, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig,
+         tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
+         tls_tests::check, tls_tests::BADCERT_CN_MISMATCH, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig,
          tls_tests::clientConfig, tls_tests::connect, tls_tests::drive, tls_tests::completed,
          tls_tests::describe, tls_tests::carries, tls_tests::Session, tls_tests::Outcome };
 export { streamTests };
@@ -54,8 +54,8 @@ fn int32 versionTests() {
             f = f + check(ok: suite.length() > 0, what: "version: the cipher suite has a name");
             string hello = "hello, server";
             string back = "hello, client";
-            f = f + check(ok: carries(from: p.c(), to: p.s(), msg: hello.bytes()), what: "data: client to server");
-            f = f + check(ok: carries(from: p.s(), to: p.c(), msg: back.bytes()), what: "data: server to client");
+            f = f + check(ok: carries(from: p.c(), to: p.s(), msg: hello), what: "data: client to server");
+            f = f + check(ok: carries(from: p.s(), to: p.c(), msg: back), what: "data: server to client");
         }
         case Failed(why: w): { f = f + check(ok: false, what: "version: default handshake (".concat(other: w).concat(other: ")")); }
     };
@@ -69,7 +69,7 @@ fn int32 versionTests() {
         case Ready(session: p): {
             f = f + check(ok: isVersion(v: p.s().protocolVersion(), want: TlsVersion::Tls12), what: "version: TLS 1.2 when the client asks for it");
             string hello = "over TLS 1.2";
-            f = f + check(ok: carries(from: p.c(), to: p.s(), msg: hello.bytes()), what: "data: over TLS 1.2");
+            f = f + check(ok: carries(from: p.c(), to: p.s(), msg: hello), what: "data: over TLS 1.2");
         }
         case Failed(why: w): { f = f + check(ok: false, what: "version: TLS 1.2 handshake (".concat(other: w).concat(other: ")")); }
     };
@@ -202,10 +202,74 @@ fn int32 truncationTests() {
             p.c().innerRefMut().shut();
             FixedArray<uint8> buf = FixedArray.make(size: 1024);
             Result<isize, IoError> r = p.s().read(into: buf.viewMut());
-            bool truncated = match (r) { case Err(error: e): match (e) { case UnexpectedEof: true; case _: false; }; case Ok(value: k): false; };
+            bool truncated = match (r) { case Err(error: e): match (e.kind()) { case UnexpectedEof: true; case _: false; }; case Ok(value: k): false; };
             f = f + check(ok: truncated, what: "close: a transport that ends without close_notify is UnexpectedEof");
         }
         case Failed(why: w): { f = f + check(ok: false, what: "truncation: handshake (".concat(other: w).concat(other: ")")); }
+    };
+    return f;
+}
+
+// MBEDTLS_ERR_SSL_INVALID_MAC (-0x7180): a record that does not authenticate.
+comptime int32 INVALID_MAC = -29056;
+
+fn bool isOther(const ref IoError e) { return match (e.kind()) { case Other: true; case _: false; }; }
+
+// A failure in the TLS engine rather than the transport: the call answers `Other`, and `tlsError()` says what
+// it was — before the handshake finished, and after.
+fn int32 failureTests() {
+    int32 f = 0;
+    // A write runs the handshake, and the client rejects a certificate for another name.
+    string ca = "ca.crt"; string wrongCrt = "wronghost.crt"; string wrongKey = "wronghost.key";
+    string localhost = "localhost";
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "failure: client config"); } };
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: wrongCrt, keyName: wrongKey);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "failure: server config"); } };
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "failure: session"); } };
+    string hello = "hello";
+    bool failed = false;
+    int32 turns = 0;
+    while (turns < 8 && !failed) {
+        Result<isize, IoError> w = pair.c().write(bytes: hello.bytes());
+        failed = match (w) { case Err(error: e): isOther(e: e); case Ok(value: n): false; };
+        Result<Progress, TlsError> answered = pair.s().handshake();   // the server's next flight, if any
+        turns = turns + 1;
+    }
+    f = f + check(ok: failed, what: "failure: a write whose handshake rejects the certificate answers Other");
+    Optional<TlsError> rejected = pair.c().tlsError();
+    bool named = match (give rejected) {
+        case Some(value: e): match (e) { case Certificate(flags: fl, reasons: r): (fl & BADCERT_CN_MISMATCH) == BADCERT_CN_MISMATCH; case _: false; };
+        case None: false;
+    };
+    f = f + check(ok: named, what: "failure: tlsError() names the certificate a write's handshake rejected");
+
+    // After the handshake, a record damaged in transit.
+    TlsConfig c = mustClient();
+    TlsConfig s = mustServer();
+    Setup d = ready(client: c, server: s);
+    match (give d) {
+        case Ready(session: p): {
+            Optional<TlsError> none = p.s().tlsError();
+            bool clean = match (give none) { case Some(value: e): false; case None: true; };
+            f = f + check(ok: clean, what: "failure: a session that has not failed has no tlsError()");
+            Result<isize, IoError> w = p.c().write(bytes: hello.bytes());
+            bool sent = match (w) { case Ok(value: n): n == hello.length(); case Err(error: e): false; };
+            f = f + check(ok: sent, what: "failure: a record is sent");
+            p.c().innerRefMut().garble();
+            FixedArray<uint8> buf = FixedArray.make(size: 64);
+            Result<isize, IoError> r = p.s().read(into: buf.viewMut());
+            bool other = match (r) { case Err(error: e): isOther(e: e); case Ok(value: k): false; };
+            f = f + check(ok: other, what: "failure: a record that does not authenticate answers Other");
+            Optional<TlsError> why = p.s().tlsError();
+            bool mac = match (give why) {
+                case Some(value: e): match (e) { case Session(code: k, detail: x): k == INVALID_MAC; case _: false; };
+                case None: false;
+            };
+            f = f + check(ok: mac, what: "failure: tlsError() is Session with the engine's bad-MAC code");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "failure: handshake (".concat(other: w).concat(other: ")")); }
     };
     return f;
 }
@@ -270,6 +334,7 @@ fn int32 streamTests() {
     f = f + clientCertificateTests();
     f = f + transferTests();
     f = f + truncationTests();
+    f = f + failureTests();
     f = f + channelBindingTests();
     f = f + systemTrustTests();
     return f;
