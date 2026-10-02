@@ -108,6 +108,12 @@ type resource TlsConfig implements Sendable {
         return checked(rc: ktls_config_verify(c: this.handle, mode: m));
     }
 
+    // A server: ask the client for a certificate, but complete the handshake whatever it answers — none, or one
+    // that does not chain. (`verify(mode: Verify::Chain)` requires one that chains.)
+    public unsafe fn Result<Unit, TlsError> requestClientCertificate() {
+        return checked(rc: ktls_config_verify(c: this.handle, mode: 3));
+    }
+
     // Trust the CA certificates in a PEM (or DER) file.
     public unsafe fn Result<Unit, TlsError> trustFile(const ref string path) {
         return checked(rc: ktls_config_trust_file(c: this.handle, path: path.cstr()));

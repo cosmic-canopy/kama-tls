@@ -1,0 +1,76 @@
+// What each side sees of the other's asks: whether the server asked for a client certificate (a client's
+// `certificateRequested()`, which libpq's sslcertmode=require needs), and the name a client sent as SNI (a
+// server's `requestedServerName()`). Under TLS 1.3 and 1.2, since each version asks in a message of its own.
+import { tls::TlsConfig, tls::TlsError, tls::Verify, tls::TlsVersion,
+         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome };
+export { requestTests };
+
+// The server's policy: 0 asks for nothing, 1 asks but accepts any answer, 2 requires a certificate that chains.
+fn TlsConfig server(int32 policy) {
+    string crt = "server.crt"; string key = "server.key";
+    Result<TlsConfig, TlsError> made = serverConfig(certName: crt, keyName: key);
+    TlsConfig s = match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "server config"); return server(policy: policy); } };
+    if (policy == 1) { Result<Unit, TlsError> r = s.requestClientCertificate(); }
+    if (policy == 2) {
+        Result<Unit, TlsError> v = s.verify(mode: Verify::Chain);
+        Result<Unit, TlsError> t = s.trustFile(path: certPath(name: "ca.crt"));
+    }
+    return give s;
+}
+
+fn TlsConfig client(bool withCertificate, bool tls12) {
+    string ca = "ca.crt";
+    Result<TlsConfig, TlsError> made = clientConfig(mode: Verify::Chain, caName: ca);
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "client config"); return client(withCertificate: withCertificate, tls12: tls12); } };
+    if (withCertificate) {
+        string crt = certPath(name: "client.crt");
+        string key = certPath(name: "client.key");
+        string nopw = "";
+        Result<Unit, TlsError> id = c.identityFiles(certificate: crt, key: key, password: nopw);
+    }
+    if (tls12) { Result<Unit, TlsError> pin = c.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12); }
+    return give c;
+}
+
+fn int32 requestedCase(int32 policy, bool withCertificate, bool tls12, bool wantRequested, const ref string what) {
+    TlsConfig c = client(withCertificate: withCertificate, tls12: tls12);
+    TlsConfig s = server(policy: policy);
+    string localhost = "localhost";
+    Result<Session, TlsError> made = connect(client: c, server: s, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": session")); } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    int32 f = check(ok: completed(o: o), what: what.concat(other: ": the handshake completes (").concat(other: describe(o: o)).concat(other: ")"));
+    bool asked = pair.c().certificateRequested();
+    string want = "false";
+    if (wantRequested) { want = "true"; }
+    return f + check(ok: asked == wantRequested, what: what.concat(other: ": certificateRequested() is ").concat(other: want));
+}
+
+fn int32 sniCase(const ref string name, bool wantSent, const ref string what) {
+    TlsConfig c = client(withCertificate: false, tls12: false);
+    TlsConfig s = server(policy: 0);
+    Result<Session, TlsError> made = connect(client: c, server: s, name: name);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": session")); } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    int32 f = check(ok: completed(o: o), what: what.concat(other: ": the handshake completes (").concat(other: describe(o: o)).concat(other: ")"));
+    Optional<string> seen = pair.s().requestedServerName();
+    bool right = match (give seen) { case Some(value: v): wantSent && v.equals(other: name); case None: !wantSent; };
+    return f + check(ok: right, what: copy what);
+}
+
+fn int32 requestTests() {
+    int32 f = 0;
+    f = f + requestedCase(policy: 0, withCertificate: true, tls12: false, wantRequested: false, what: "request: TLS 1.3, a server that asks for nothing");
+    f = f + requestedCase(policy: 1, withCertificate: false, tls12: false, wantRequested: true, what: "request: TLS 1.3, an optional ask, no certificate to send");
+    f = f + requestedCase(policy: 1, withCertificate: true, tls12: false, wantRequested: true, what: "request: TLS 1.3, an optional ask, a certificate sent");
+    f = f + requestedCase(policy: 2, withCertificate: true, tls12: false, wantRequested: true, what: "request: TLS 1.3, a required certificate");
+    f = f + requestedCase(policy: 0, withCertificate: true, tls12: true, wantRequested: false, what: "request: TLS 1.2, a server that asks for nothing");
+    f = f + requestedCase(policy: 1, withCertificate: false, tls12: true, wantRequested: true, what: "request: TLS 1.2, an optional ask, no certificate to send");
+    f = f + requestedCase(policy: 2, withCertificate: true, tls12: true, wantRequested: true, what: "request: TLS 1.2, a required certificate");
+    string localhost = "localhost";
+    string none = "";
+    f = f + sniCase(name: localhost, wantSent: true, what: "sni: a client's name reaches the server");
+    f = f + sniCase(name: none, wantSent: false, what: "sni: a client with no name sends none");
+    return f;
+}

@@ -2,7 +2,9 @@
    moves the bytes. Nothing here allocates on the hot path except to grow those two buffers. */
 
 /* The RFC 5929 end-point hash needs the certificate's signature hash, which Mbed TLS 4 keeps in a private
-   field. This file, and only this file, reads it. */
+   field, and whether a server asked for a client certificate is known only to the private handshake state
+   (ssl_misc.h, on the include path because kama puts every C source directory there). This file, and only this
+   file, reads them. */
 #define MBEDTLS_ALLOW_PRIVATE_ACCESS
 
 #include "ktls.h"
@@ -23,6 +25,8 @@
 #include <mbedtls/x509_crl.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
+
+#include "ssl_misc.h"
 
 /* ---- process setup -------------------------------------------------------------------------------------- */
 
@@ -49,13 +53,15 @@ static size_t ktls_copy_out(const void *src, size_t len, uint8_t *buf, size_t ca
 
 /* ---- configuration -------------------------------------------------------------------------------------- */
 
+static int ktls_sni_seen(void *ctx, mbedtls_ssl_context *ssl, const unsigned char *name, size_t len);
+
 #define KTLS_MAX_ALPN 8
 
 struct ktls_config {
     atomic_int refs;
     atomic_int frozen;            /* set when the first session is made from it */
     int32_t server;
-    int32_t verify;               /* 0 none, 1 chain only, 2 chain and name */
+    int32_t verify;               /* 0 none, 1 chain only, 2 chain and name; a server's 3 asks without requiring */
     mbedtls_ssl_config conf;
     mbedtls_x509_crt trust;
     int32_t trust_loaded;
@@ -99,7 +105,8 @@ static int ktls_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t 
 
 static void ktls_config_apply_verify(ktls_config *c)
 {
-    int authmode = c->verify == 0 ? MBEDTLS_SSL_VERIFY_NONE : MBEDTLS_SSL_VERIFY_REQUIRED;
+    int authmode = c->verify == 0 ? MBEDTLS_SSL_VERIFY_NONE
+                 : c->verify == 3 ? MBEDTLS_SSL_VERIFY_OPTIONAL : MBEDTLS_SSL_VERIFY_REQUIRED;
     mbedtls_ssl_conf_authmode(&c->conf, authmode);
     mbedtls_ssl_conf_verify(&c->conf, ktls_verify_cb, c);
 }
@@ -124,6 +131,7 @@ ktls_config *ktls_config_new(int32_t server)
         return NULL;
     }
     ktls_config_apply_verify(c);
+    if (c->server) mbedtls_ssl_conf_sni(&c->conf, ktls_sni_seen, NULL);
     return c;
 }
 
@@ -147,7 +155,7 @@ static int ktls_mutable(const ktls_config *c) { return !atomic_load_explicit(&c-
 int32_t ktls_config_verify(ktls_config *c, int32_t mode)
 {
     if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
-    if (mode < 0 || mode > 2) return KTLS_ERR_INPUT;
+    if (mode < 0 || mode > 3 || (mode == 3 && !c->server)) return KTLS_ERR_INPUT;
     c->verify = mode;
     ktls_config_apply_verify(c);
     return 0;
@@ -314,7 +322,22 @@ struct ktls_session {
     ktls_buffer in;    /* ciphertext from the peer, not yet read by the engine */
     ktls_buffer out;   /* ciphertext for the peer, not yet taken by the caller */
     int32_t eof;       /* the transport ended: once `in` is empty, the engine sees end of stream */
+    int32_t cert_requested;   /* a client: the server sent a CertificateRequest */
+    char *sni;                /* a server: the name the client sent as SNI, NULL if none */
 };
+
+/* A server records the name a client asked for. Any name is accepted: the session serves its one identity. */
+static int ktls_sni_seen(void *ctx, mbedtls_ssl_context *ssl, const unsigned char *name, size_t len)
+{
+    (void)ctx;
+    ktls_session *s = mbedtls_ssl_get_user_data_p(ssl);
+    if (s == NULL || s->sni != NULL) return 0;
+    s->sni = malloc(len + 1);
+    if (s->sni == NULL) return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+    memcpy(s->sni, name, len);
+    s->sni[len] = 0;
+    return 0;
+}
 
 static int ktls_buffer_append(ktls_buffer *b, const uint8_t *src, size_t len)
 {
@@ -369,7 +392,8 @@ ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t 
 {
     *err = 0;
     if (c->server && !c->own_loaded) { *err = KTLS_ERR_INPUT; return NULL; }
-    if (c->verify != 0 && !c->trust_loaded) { *err = KTLS_ERR_NOTRUST; return NULL; }
+    /* Verifying needs something to verify against; a server that only asks for a certificate (3) does not. */
+    if ((c->verify == 1 || c->verify == 2) && !c->trust_loaded) { *err = KTLS_ERR_NOTRUST; return NULL; }
     int has_name = server_name != NULL && server_name[0] != 0;
     /* Only full verification needs a name to compare; chain-only and none may go without one (and without SNI). */
     if (!c->server && c->verify == 2 && !has_name) { *err = KTLS_ERR_INPUT; return NULL; }
@@ -380,6 +404,7 @@ ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t 
     s->config = c;
     mbedtls_ssl_init(&s->ssl);
     int rc = mbedtls_ssl_setup(&s->ssl, &c->conf);
+    mbedtls_ssl_set_user_data_p(&s->ssl, s);
     /* A client sends its name as SNI and, under full verification, checks the certificate against it (chain-only
        mode clears just the mismatch). With no name it sends no SNI and compares no name, which Mbed TLS 4 wants
        said explicitly. */
@@ -396,6 +421,7 @@ void ktls_session_free(ktls_session *s)
     ktls_buffer_free(&s->in);
     ktls_buffer_free(&s->out);
     ktls_config_release(s->config);
+    free(s->sni);
     free(s);
 }
 
@@ -423,11 +449,26 @@ void ktls_out_consume(ktls_session *s, size_t n)
     if (s->out.start == s->out.end) s->out.start = s->out.end = 0;
 }
 
+/* mbedtls_ssl_handshake is a loop over mbedtls_ssl_handshake_step; it is run here a step at a time, so that
+   between steps a client can note a CertificateRequest, which Mbed TLS keeps only in its handshake state and
+   frees when the handshake ends. */
 int32_t ktls_handshake(ktls_session *s)
 {
-    int rc = mbedtls_ssl_handshake(&s->ssl);
+    int rc = 0;
+    while (!mbedtls_ssl_is_handshake_over(&s->ssl)) {
+        rc = mbedtls_ssl_handshake_step(&s->ssl);
+        if (!s->config->server && s->ssl.handshake != NULL && s->ssl.handshake->client_auth) s->cert_requested = 1;
+        if (rc != 0) break;
+    }
     if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return KTLS_WANT_READ;
     return rc;
+}
+
+int32_t ktls_cert_requested(const ktls_session *s) { return s->cert_requested; }
+
+size_t ktls_sni(const ktls_session *s, uint8_t *buf, size_t cap)
+{
+    return s->sni == NULL ? 0 : ktls_copy_out(s->sni, strlen(s->sni), buf, cap);
 }
 
 int32_t ktls_read(ktls_session *s, uint8_t *buf, size_t cap)

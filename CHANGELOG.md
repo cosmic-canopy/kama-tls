@@ -28,6 +28,11 @@ Needs **kama ≥ 0.9.519**.
   Copyright is Cosmic Canopy LLC and the kama contributors. Mbed TLS stays Apache-2.0 OR GPL-2.0-or-later.
 
 ### Added
+- `TlsStream.certificateRequested()`: a client learns whether the server asked for a certificate (libpq's
+  `sslcertmode=require` needs it). The handshake now runs a step at a time in ktls, which samples Mbed TLS's
+  private handshake state between steps.
+- For a server: `TlsConfig.requestClientCertificate()` asks for a client certificate but completes the handshake
+  whatever the client answers, and `TlsStream.requestedServerName()` is the SNI the client sent.
 - Certificate revocation lists: `TlsConfig.revocationFile(path)`, `revocationPem(bytes)` (PEM or DER) and
   `revocationDir(path)` (the CRLs of an OpenSSL hashed directory, `<hash>.r<n>`). `revocation(mode:)` chooses
   `Revocation::Listed` (Mbed TLS's rule, the default: a certificate whose issuer has no CRL passes) or

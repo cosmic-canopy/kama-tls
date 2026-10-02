@@ -39,6 +39,8 @@ extern fn usize ktls_peer_names(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_alpn(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_ciphersuite(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn int32 ktls_protocol(UnsafePtr s);
+extern fn int32 ktls_cert_requested(UnsafePtr s);
+extern fn usize ktls_sni(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
 
 // The engine's own answers (csrc/ktls.h) and the one Mbed TLS code this file tells apart, each pinned by a
@@ -239,6 +241,17 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         return Optional::None;
     }
 
+    // A client: whether the server asked for a certificate during the handshake (a CertificateRequest), whether
+    // or not this side had one to send. libpq's sslcertmode=require refuses a server that did not.
+    public unsafe const fn bool certificateRequested() { return ktls_cert_requested(s: this.session) != 0; }
+
+    // A server: the name the client sent as SNI, if it sent one.
+    public unsafe fn Optional<string> requestedServerName() {
+        DynamicArray<uint8> b = this.bytesFrom(which: 5);
+        if (b.length() == 0) { return Optional::None; }
+        return Optional::Some(value: kama_string_from_raw(src: b.view().dataPtr(), start: 0, len: b.length()));
+    }
+
     // Why the engine failed, the last time it did: what a read, write or flush that answered an `Other` error
     // means, as `handshake()` would have said it. `None` while the engine has not failed.
     public unsafe fn Optional<TlsError> tlsError() {
@@ -337,7 +350,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
     }
 
     // One of the byte answers, at its full length: 0 the peer certificate, 1 the end-point hash, 2 the ALPN
-    // protocol, 3 the cipher suite, 4 the peer certificate's names.
+    // protocol, 3 the cipher suite, 4 the peer certificate's names, 5 the SNI a server received.
     unsafe fn DynamicArray<uint8> bytesFrom(int32 which) {
         isize cap = 256;
         while (true) {
@@ -347,6 +360,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
             else if (which == 1) { got = ktls_end_point(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else if (which == 2) { got = ktls_alpn(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else if (which == 4) { got = ktls_peer_names(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else if (which == 5) { got = ktls_sni(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else { got = ktls_ciphersuite(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             isize n = cast<isize>(got);
             if (n <= cap) {

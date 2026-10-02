@@ -38,7 +38,8 @@ void ktls_config_retain(ktls_config *c);
 void ktls_config_release(ktls_config *c);               /* frees on the last release */
 
 /* 0 none, 1 verify the chain only, 2 verify the chain AND the server name (client); for a server, 0 does not
-   ask for a client certificate and 1 or 2 require one that chains to the trust roots. */
+   ask for a client certificate, 1 or 2 require one that chains to the trust roots, and 3 asks for one but
+   completes the handshake whatever the client answers (none, or one that does not verify). */
 int32_t ktls_config_verify(ktls_config *c, int32_t mode);
 int32_t ktls_config_trust_file(ktls_config *c, const char *path);   /* a PEM or DER file of CA certificates */
 int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len);
@@ -105,6 +106,8 @@ size_t ktls_peer_names(const ktls_session *s, uint8_t *buf, size_t cap);
 size_t ktls_alpn(const ktls_session *s, uint8_t *buf, size_t cap);        /* 0 when none was agreed */
 size_t ktls_ciphersuite(const ktls_session *s, uint8_t *buf, size_t cap);
 int32_t ktls_protocol(const ktls_session *s);                             /* 0x0303 / 0x0304; 0 before */
+int32_t ktls_cert_requested(const ktls_session *s);  /* a client: 1 once the server has asked for a certificate */
+size_t ktls_sni(const ktls_session *s, uint8_t *buf, size_t cap);          /* a server: the SNI received; 0 if none */
 
 /* ---- a certificate on its own ----------------------------------------------------------------------------
    Parsed from PEM (the first certificate of a bundle) or DER, with no session: its DER, its names (as
