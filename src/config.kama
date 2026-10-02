@@ -1,5 +1,5 @@
-import { core::env, std::fs::exists, std::collections::ConstView, tls::TlsError, tls::TlsVersion, tls::Verify,
-         tls::errorText, tls::ready };
+import { core::env, std::fs::exists, std::fs::readDir, std::io::IoError, std::collections::ConstView,
+         std::collections::DynamicArray, tls::TlsError, tls::TlsVersion, tls::Verify, tls::Revocation, tls::errorText, tls::ready };
 export { TlsConfig };
 
 // A TLS configuration: the role, what to trust, who this side is, how much to verify, which application
@@ -25,6 +25,9 @@ extern fn int32 ktls_config_identity_pem(UnsafePtr c, UnsafeConstPtr<uint8> cert
 extern fn int32 ktls_config_alpn(UnsafePtr c, UnsafeConstPtr<uint8> protocol, usize len);
 extern fn int32 ktls_config_versions(UnsafePtr c, int32 min, int32 max);
 extern fn int32 ktls_config_trust_count(UnsafePtr c);
+extern fn int32 ktls_config_crl_file(UnsafePtr c, UnsafeConstPtr<cchar> path);
+extern fn int32 ktls_config_crl_pem(UnsafePtr c, UnsafeConstPtr<uint8> data, usize len);
+extern fn int32 ktls_config_crl_complete(UnsafePtr c, int32 on);
 
 // The CA bundles an operating system keeps, in the order they are tried by `trustSystem()`: Debian/Ubuntu,
 // RHEL/Fedora, openSUSE, Alpine and macOS (Apple maintains /etc/ssl/cert.pem from its own trust store).
@@ -36,6 +39,27 @@ fn string systemBundle(isize i) {
     if (i == 2) { return "/etc/ssl/ca-bundle.pem"; }
     if (i == 3) { return "/etc/ssl/cert.pem"; }
     return "/usr/local/etc/openssl/cert.pem";
+}
+
+// `<8 lower-case hex digits>.r<digits>`: a CRL in OpenSSL's hashed-directory layout.
+fn bool hashedCrlName(const ref string name) {
+    if (name.length() < 11) { return false; }
+    isize i = 0;
+    while (i < 8) {
+        uint8 b = name[i];
+        bool digit = b >= 48ui8 && b <= 57ui8;
+        bool lower = b >= 97ui8 && b <= 102ui8;
+        if (!digit && !lower) { return false; }
+        i = i + 1;
+    }
+    if (name[8] != 46ui8 || name[9] != 114ui8) { return false; }
+    i = 10;
+    while (i < name.length()) {
+        uint8 b = name[i];
+        if (b < 48ui8 || b > 57ui8) { return false; }
+        i = i + 1;
+    }
+    return true;
 }
 
 unsafe fn int32 alpnOf(UnsafePtr c, ConstView<uint8> name) {
@@ -149,6 +173,43 @@ type resource TlsConfig implements Sendable {
         int32 lo = match (min) { case Tls12: 771; case Tls13: 772; };
         int32 hi = match (max) { case Tls12: 771; case Tls13: 772; };
         return checked(rc: ktls_config_versions(c: this.handle, min: lo, max: hi));
+    }
+
+    // Check the peer's chain against the certificate revocation lists in a PEM or DER file. Each call adds to the
+    // set; `revocation(mode:)` says what a certificate whose issuer has no CRL means.
+    public unsafe fn Result<Unit, TlsError> revocationFile(const ref string path) {
+        return checked(rc: ktls_config_crl_file(c: this.handle, path: path.cstr()));
+    }
+
+    // The same, for CRLs already in memory, PEM or DER.
+    public unsafe fn Result<Unit, TlsError> revocationPem(ConstView<uint8> crl) {
+        return checked(rc: ktls_config_crl_pem(c: this.handle, data: crl.dataPtr(), len: cast<usize>(crl.length())));
+    }
+
+    // Every CRL in a directory laid out as OpenSSL's hashed lookup lays it out (`openssl rehash`): files named
+    // `<8 hex digits>.r<n>`. OpenSSL opens such a file when a certificate's issuer hashes to its name; this loads
+    // them all up front, which decides the same chains. Other files are ignored. Answers how many were loaded.
+    public unsafe fn Result<isize, TlsError> revocationDir(const ref string path) {
+        Result<DynamicArray<string>, IoError> listed = readDir(path: path);
+        DynamicArray<string> names = match (give listed) {
+            case Ok(value: n): give n;
+            case Err(error: e): { return Result::Err(error: TlsError::Io(error: e)); }
+        };
+        isize loaded = 0;
+        foreach (string name in names) {
+            if (hashedCrlName(name: name)) {
+                string full = path.concat(other: "/").concat(other: name);
+                Result<Unit, TlsError> one = this.revocationFile(path: full);
+                match (give one) { case Ok(value: u): { loaded = loaded + 1; } case Err(error: e): { return Result::Err(error: give e); } };
+            }
+        }
+        return Result::Ok(value: loaded);
+    }
+
+    // How the loaded CRLs are applied: `Revocation::Listed` (the default) or `Revocation::Complete`.
+    public unsafe fn Result<Unit, TlsError> revocation(Revocation mode) {
+        int32 on = match (mode) { case Listed: 0; case Complete: 1; };
+        return checked(rc: ktls_config_crl_complete(c: this.handle, on: on));
     }
 
     // How many CA certificates are trusted.

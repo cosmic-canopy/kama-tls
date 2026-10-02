@@ -1,5 +1,5 @@
 import { std::io::IoError, std::collections::FixedArray };
-export { TlsError, TlsVersion, Verify, Progress, ready, version, errorText };
+export { TlsError, TlsVersion, Verify, Revocation, Progress, ready, version, errorText, BADCERT_NO_CRL };
 
 // @kama/tls — TLS for kama: Mbed TLS 4.1 LTS, vendored and bound. Nothing cryptographic is written here; the
 // handshake, the record layer and X.509 are Mbed TLS's. This package adds the kama shape around them:
@@ -110,6 +110,18 @@ type enum TlsVersion { Tls12, Tls13 }
 //   Full   the chain AND the server name (libpq's verify-full, every browser). A client's default.
 // A server takes `None` (no client certificate) or `Chain`/`Full` (require one that chains to its roots).
 type enum Verify { None, Chain, Full }
+
+// How certificate revocation lists are applied, once any are loaded.
+//   Listed    a certificate is checked against its issuer's CRL when one is loaded, and passes when none is
+//             (Mbed TLS's rule). The default.
+//   Complete  every certificate in the chain, the trust anchor too, must have its issuer's CRL among those loaded;
+//             one that has none fails verification with `BADCERT_NO_CRL` (OpenSSL's CRL_CHECK_ALL, which libpq
+//             sets as soon as it loads a CRL).
+type enum Revocation { Listed, Complete }
+
+// The verification flag this package adds beside Mbed TLS's MBEDTLS_X509_BADCERT_* bits in
+// `TlsError::Certificate`: no CRL from the certificate's issuer was loaded, under `Revocation::Complete`.
+comptime uint32 BADCERT_NO_CRL = 16777216ui32;   // 0x01000000, KTLS_BADCERT_NO_CRL
 
 // Where a non-blocking handshake stands. `WantRead`/`WantWrite`: wait until the transport is readable /
 // writable, then call `handshake()` again.

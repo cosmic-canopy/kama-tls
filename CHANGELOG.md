@@ -28,6 +28,11 @@ Needs **kama ≥ 0.9.519**.
   Copyright is Cosmic Canopy LLC and the kama contributors. Mbed TLS stays Apache-2.0 OR GPL-2.0-or-later.
 
 ### Added
+- Certificate revocation lists: `TlsConfig.revocationFile(path)`, `revocationPem(bytes)` (PEM or DER) and
+  `revocationDir(path)` (the CRLs of an OpenSSL hashed directory, `<hash>.r<n>`). `revocation(mode:)` chooses
+  `Revocation::Listed` (Mbed TLS's rule, the default: a certificate whose issuer has no CRL passes) or
+  `Revocation::Complete` (OpenSSL's CRL_CHECK_ALL, which libpq sets: every certificate in the chain, the trust
+  anchor too, needs its issuer's CRL, or fails with `BADCERT_NO_CRL`).
 - `Certificate.parse(bytes)`: an X.509 certificate from PEM or DER, with no session, and its `der()`, `names()` and
   `tlsServerEndPoint()`.
 - `CertificateNames` (`count()`, `kindAt(index:)`, `valueAt(index:)`) and `TlsStream.peerNames()`: the names a

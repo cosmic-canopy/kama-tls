@@ -2,7 +2,7 @@
 // are hermetic — a client and a server handshake over an in-memory pipe, or over loopback TCP with the server
 // in its own isolate — so they run anywhere `tools/test.sh` runs, debug and release. A failing case prints
 // its name, so the log says WHICH, not just that.
-import { core::println, tls::TlsError, tls::ready, tls::version, tls_tests::handshakeTests, tls_tests::streamTests, tls_tests::tcpTests, tls_tests::wordsTests, tls_tests::certificateTests };
+import { core::println, tls::TlsError, tls::ready, tls::version, tls_tests::handshakeTests, tls_tests::streamTests, tls_tests::tcpTests, tls_tests::wordsTests, tls_tests::certificateTests, tls_tests::revocationTests };
 export { check };
 
 fn int32 check(bool ok, string what) {
@@ -32,6 +32,7 @@ fn int32 main() {
     failed = failed + tcpTests();
     failed = failed + wordsTests();
     failed = failed + certificateTests();
+    failed = failed + revocationTests();
     if (failed != 0) { println(s: "tls tests: ${failed} failed"); return 1; }
     string v = version();
     println(s: "tls tests: OK (Mbed TLS ${v})");

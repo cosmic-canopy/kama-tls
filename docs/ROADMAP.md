@@ -5,7 +5,7 @@ arm64 and Linux aarch64. The package is ported to kama 0.9.519, which has the ne
 every gap this package filed (KTLS-1 to KTLS-3), and it now needs that compiler. Phase 3 is under way:
 `@kama/postgres` phase 6 needs, in order, failures in words (alerts, keys, `reason()`) and the RFC 5929 fix
 (done); chain verification without SNI and certificate names, parsed from a session or a file (done); CRLs with OpenSSL's
-check-all rule; whether the server asked for a client certificate; a step-wise identity; and, last, key export
+check-all rule (done); whether the server asked for a client certificate; a step-wise identity; and, last, key export
 for `sslkeylogfile`.
 
 | # | phase | state |

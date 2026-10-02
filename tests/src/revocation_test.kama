@@ -1,0 +1,116 @@
+// Certificate revocation lists. tools/gen-certs.sh has the CA revoke revoked.crt and issue revoked.crl (listing
+// it), empty.crl (listing nothing, issued before the revocation) and crldir/<hash>.r0 (revoked.crl under its
+// OpenSSL hashed name); the untrusted CA issues other-ca.crl.
+import { std::io::IoError, std::collections::DynamicArray, std::fs::readText,
+         tls::TlsConfig, tls::TlsError, tls::Verify, tls::Revocation, tls::BADCERT_NO_CRL,
+         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome };
+export { revocationTests };
+
+// MBEDTLS_X509_BADCERT_REVOKED.
+comptime uint32 BADCERT_REVOKED = 2ui32;
+
+// The CRL sources a client loads: "file:<name>", "pem:<name>" (read here, handed over as bytes) or "dir:<name>".
+fn Result<Unit, TlsError> load(ref TlsConfig c, const ref string source) {
+    if (source.startsWith(prefix: "file:")) {
+        string name = source.substring(start: 5, end: source.length());
+        return c.revocationFile(path: certPath(name: name));
+    }
+    if (source.startsWith(prefix: "pem:")) {
+        string name = source.substring(start: 4, end: source.length());
+        Result<string, IoError> text = readText(path: certPath(name: name));
+        string pem = match (give text) { case Ok(value: t): give t; case Err(error: e): { return Result::Err(error: TlsError::Io(error: e)); } };
+        return c.revocationPem(crl: pem.bytes());
+    }
+    string name = source.substring(start: 4, end: source.length());
+    Result<isize, TlsError> n = c.revocationDir(path: certPath(name: name));
+    return match (give n) {
+        case Ok(value: k): {
+            if (k != 1) { return Result::Err(error: TlsError::Config(code: -5, detail: "crldir held ${k} CRLs, not 1")); }
+            return Result::Ok(value: Unit::Unit);
+        }
+        case Err(error: e): Result::Err(error: give e);
+    };
+}
+
+// A Chain-verifying client trusting the test CA, with the CRLs in `sources`, against a server presenting
+// `certName`.
+fn Outcome attempt(const ref string certName, const ref string keyName, const ref DynamicArray<string> sources, Revocation mode) {
+    string ca = "ca.crt";
+    string localhost = "localhost";
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "client config"); return Outcome::Stalled; } };
+    foreach (string source in sources) {
+        Result<Unit, TlsError> loaded = load(c: client, source: source);
+        match (give loaded) { case Ok(value: u): { } case Err(error: e): { string m = e.message(); panic(msg: "load ${source}: ${m}"); return Outcome::Stalled; } };
+    }
+    Result<Unit, TlsError> set = client.revocation(mode: mode);
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: certName, keyName: keyName);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "server config"); return Outcome::Stalled; } };
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "session"); return Outcome::Stalled; } };
+    return drive(c: pair.c(), s: pair.s());
+}
+
+fn bool rejected(const ref Outcome o, uint32 want) {
+    return match (o) {
+        case ClientFailed(error: e): match (e) { case Certificate(flags: f, reasons: r): (f & want) == want; case _: false; };
+        case _: false;
+    };
+}
+
+fn DynamicArray<string> one(const ref string source) {
+    DynamicArray<string> list = DynamicArray.empty();
+    list.add(item: copy source);
+    return list;
+}
+
+fn int32 revocationTests() {
+    int32 f = 0;
+    string revokedCrt = "revoked.crt"; string revokedKey = "revoked.key";
+    string srvCrt = "server.crt"; string srvKey = "server.key";
+    string revokedFile = "file:revoked.crl";
+    string emptyFile = "file:empty.crl";
+    string revokedPem = "pem:revoked.crl";
+    string revokedDir = "dir:crldir";
+    string otherFile = "file:other-ca.crl";
+
+    Outcome o1 = attempt(certName: revokedCrt, keyName: revokedKey, sources: one(source: revokedFile), mode: Revocation::Listed);
+    f = f + check(ok: rejected(o: o1, want: BADCERT_REVOKED), what: "crl: a revoked certificate is rejected (".concat(other: describe(o: o1)).concat(other: ")"));
+    Outcome o2 = attempt(certName: revokedCrt, keyName: revokedKey, sources: one(source: emptyFile), mode: Revocation::Listed);
+    f = f + check(ok: completed(o: o2), what: "crl: the CA's CRL from before the revocation lets it through (".concat(other: describe(o: o2)).concat(other: ")"));
+    Outcome o3 = attempt(certName: srvCrt, keyName: srvKey, sources: one(source: revokedFile), mode: Revocation::Listed);
+    f = f + check(ok: completed(o: o3), what: "crl: a certificate the CRL does not list passes (".concat(other: describe(o: o3)).concat(other: ")"));
+    Outcome o4 = attempt(certName: revokedCrt, keyName: revokedKey, sources: one(source: revokedPem), mode: Revocation::Listed);
+    f = f + check(ok: rejected(o: o4, want: BADCERT_REVOKED), what: "crl: a CRL from PEM bytes (".concat(other: describe(o: o4)).concat(other: ")"));
+    Outcome o5 = attempt(certName: revokedCrt, keyName: revokedKey, sources: one(source: revokedDir), mode: Revocation::Listed);
+    f = f + check(ok: rejected(o: o5, want: BADCERT_REVOKED), what: "crl: a CRL from a hashed directory (".concat(other: describe(o: o5)).concat(other: ")"));
+
+    // Only the untrusted CA's CRL: under Listed the chain passes, as Mbed TLS has it; under Complete neither the
+    // leaf nor the CA has its issuer's CRL, as OpenSSL's CRL_CHECK_ALL has it.
+    Outcome o6 = attempt(certName: srvCrt, keyName: srvKey, sources: one(source: otherFile), mode: Revocation::Listed);
+    f = f + check(ok: completed(o: o6), what: "crl: Listed passes a chain whose issuer has no CRL (".concat(other: describe(o: o6)).concat(other: ")"));
+    Outcome o7 = attempt(certName: srvCrt, keyName: srvKey, sources: one(source: otherFile), mode: Revocation::Complete);
+    f = f + check(ok: rejected(o: o7, want: BADCERT_NO_CRL), what: "crl: Complete rejects a chain whose issuer has no CRL (".concat(other: describe(o: o7)).concat(other: ")"));
+    match (o7) {
+        case ClientFailed(error: e): {
+            string why = e.reason();
+            f = f + check(ok: why.contains(substring: "no CRL from the certificate's issuer was loaded"), what: "crl: the missing CRL is said in words (".concat(other: why).concat(other: ")"));
+        }
+        case _: { }
+    };
+    // The CA's own CRL covers the CA too (its issuer is itself), so the whole chain is covered.
+    Outcome o8 = attempt(certName: srvCrt, keyName: srvKey, sources: one(source: revokedFile), mode: Revocation::Complete);
+    f = f + check(ok: completed(o: o8), what: "crl: Complete passes a chain the CA's CRL covers (".concat(other: describe(o: o8)).concat(other: ")"));
+    Outcome o9 = attempt(certName: revokedCrt, keyName: revokedKey, sources: one(source: revokedFile), mode: Revocation::Complete);
+    f = f + check(ok: rejected(o: o9, want: BADCERT_REVOKED), what: "crl: Complete still rejects a revoked certificate (".concat(other: describe(o: o9)).concat(other: ")"));
+
+    // A CRL file that is not there is a configuration error, not a silent pass.
+    Result<TlsConfig, TlsError> made = TlsConfig.client();
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return f + check(ok: false, what: "crl: client config"); } };
+    string missing = certPath(name: "no-such.crl");
+    Result<Unit, TlsError> absent = c.revocationFile(path: missing);
+    bool refused = match (give absent) { case Ok(value: u): false; case Err(error: e): match (e) { case Config(code: k, detail: d): k < 0; case _: false; }; };
+    f = f + check(ok: refused, what: "crl: a missing CRL file is a Config error");
+    return f;
+}

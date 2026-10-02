@@ -32,7 +32,7 @@ DIR="$ROOT/out/test-certs"
 OPENSSL=${OPENSSL:-openssl}
 
 # Bump GENERATION when the set of files changes, so an older out/test-certs is regenerated rather than used.
-GENERATION=2
+GENERATION=3
 KEY_PASSWORD='kama-tls test key pw'
 if [ "$(cat "$DIR/.generation" 2>/dev/null)" = "$GENERATION" ] && [ "${1:-}" != "--force" ]; then
     exit 0
@@ -114,8 +114,9 @@ leaf client     tls-client    client    rsa
 
 # Leaves signed with other hashes, and the end-point hash RFC 5929 assigns each: SHA-1 (like MD5) becomes SHA-256,
 # every other hash is used as it is.
+# (MD is set and cleared around the call: an assignment in front of a shell function call outlives it in sh.)
 for md in sha224 sha384 sha1; do
-    MD=$md leaf "server-$md" localhost server rsa
+    MD=$md; leaf "server-$md" localhost server rsa; MD=
     case $md in sha1) dg=sha256 ;; *) dg=$md ;; esac
     "$OPENSSL" x509 -in "../server-$md.crt" -outform DER | "$OPENSSL" dgst "-$dg" -binary | od -An -v -tx1 | tr -d ' \n' > "../server-$md.endpoint"
 done

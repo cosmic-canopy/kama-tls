@@ -49,6 +49,16 @@ int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cer
 int32_t ktls_config_alpn(ktls_config *c, const uint8_t *protocol, size_t len);   /* append one, in preference order */
 int32_t ktls_config_versions(ktls_config *c, int32_t min, int32_t max);         /* 0x0303 TLS 1.2, 0x0304 TLS 1.3 */
 int32_t ktls_config_trust_count(const ktls_config *c);                           /* CA certificates loaded */
+/* Certificate revocation lists: a PEM or DER file, or PEM/DER bytes; each call adds to the set. */
+int32_t ktls_config_crl_file(ktls_config *c, const char *path);
+int32_t ktls_config_crl_pem(ktls_config *c, const uint8_t *data, size_t len);
+/* 1: every certificate in a verified chain needs a CRL from its issuer among those loaded (OpenSSL's
+   CRL_CHECK_ALL); one that has none fails with KTLS_BADCERT_NO_CRL. 0 (the default): Mbed TLS's rule, a
+   certificate whose issuer has no CRL passes. */
+int32_t ktls_config_crl_complete(ktls_config *c, int32_t on);
+
+/* A verification flag of this package's own, beside Mbed TLS's MBEDTLS_X509_BADCERT_* bits. */
+#define KTLS_BADCERT_NO_CRL 0x01000000u
 
 /* ---- session ------------------------------------------------------------------------------------------ */
 typedef struct ktls_session ktls_session;

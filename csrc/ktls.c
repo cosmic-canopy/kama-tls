@@ -20,6 +20,7 @@
 #include <mbedtls/platform_util.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/version.h>
+#include <mbedtls/x509_crl.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
 
@@ -58,6 +59,9 @@ struct ktls_config {
     mbedtls_ssl_config conf;
     mbedtls_x509_crt trust;
     int32_t trust_loaded;
+    mbedtls_x509_crl crl;         /* every CRL loaded, a chain of them */
+    int32_t crl_loaded;
+    int32_t crl_complete;         /* OpenSSL's CRL_CHECK_ALL: every certificate in the chain needs its issuer's CRL */
     mbedtls_x509_crt own_cert;
     mbedtls_pk_context own_key;
     int32_t own_loaded;
@@ -65,15 +69,31 @@ struct ktls_config {
     int32_t alpn_count;
 };
 
-/* Chain-only verification: the chain must still verify, but the certificate's names are not compared with the
+/* Called by Mbed TLS for each certificate of the chain it built, the trust anchor included, with that
+   certificate's verification flags so far.
+
+   Chain-only verification: the chain must still verify, but the certificate's names are not compared with the
    server name. A client given a name sends it as SNI, and Mbed TLS then compares it too, so only that mismatch
    flag is cleared, on the leaf. A client given no name sends no SNI and says so with an explicit
    mbedtls_ssl_set_hostname(NULL), which Mbed TLS 4 takes as "verify without a name" (it refuses a verifying
-   client only when the hostname was never set at all). */
-static int ktls_verify_chain_only(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
+   client only when the hostname was never set at all).
+
+   Complete revocation (OpenSSL's X509_V_FLAG_CRL_CHECK_ALL, which libpq sets once it has loaded a CRL): every
+   certificate needs a CRL from its issuer among those loaded, the trust anchor too (its issuer is itself). Mbed
+   TLS checks a certificate against its issuer's CRL when it has one and lets it pass when it has none; this
+   marks the latter KTLS_BADCERT_NO_CRL. */
+static int ktls_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
 {
-    (void)ctx; (void)crt;
-    if (depth == 0) *flags &= ~(uint32_t)MBEDTLS_X509_BADCERT_CN_MISMATCH;
+    const ktls_config *c = ctx;
+    if (!c->server && c->verify == 1 && depth == 0) *flags &= ~(uint32_t)MBEDTLS_X509_BADCERT_CN_MISMATCH;
+    if (c->crl_complete && c->crl_loaded) {
+        int covered = 0;
+        for (const mbedtls_x509_crl *crl = &c->crl; crl != NULL && !covered; crl = crl->next) {
+            covered = crl->version != 0 && crl->issuer_raw.len == crt->issuer_raw.len &&
+                      memcmp(crl->issuer_raw.p, crt->issuer_raw.p, crt->issuer_raw.len) == 0;
+        }
+        if (!covered) *flags |= KTLS_BADCERT_NO_CRL;
+    }
     return 0;
 }
 
@@ -81,7 +101,7 @@ static void ktls_config_apply_verify(ktls_config *c)
 {
     int authmode = c->verify == 0 ? MBEDTLS_SSL_VERIFY_NONE : MBEDTLS_SSL_VERIFY_REQUIRED;
     mbedtls_ssl_conf_authmode(&c->conf, authmode);
-    mbedtls_ssl_conf_verify(&c->conf, (!c->server && c->verify == 1) ? ktls_verify_chain_only : NULL, NULL);
+    mbedtls_ssl_conf_verify(&c->conf, ktls_verify_cb, c);
 }
 
 ktls_config *ktls_config_new(int32_t server)
@@ -95,6 +115,7 @@ ktls_config *ktls_config_new(int32_t server)
     c->verify = server ? 0 : 2;   /* a client verifies chain and name unless told otherwise */
     mbedtls_ssl_config_init(&c->conf);
     mbedtls_x509_crt_init(&c->trust);
+    mbedtls_x509_crl_init(&c->crl);
     mbedtls_x509_crt_init(&c->own_cert);
     mbedtls_pk_init(&c->own_key);
     if (mbedtls_ssl_config_defaults(&c->conf, c->server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
@@ -114,6 +135,7 @@ void ktls_config_release(ktls_config *c)
     if (atomic_fetch_sub_explicit(&c->refs, 1, memory_order_acq_rel) != 1) return;
     mbedtls_ssl_config_free(&c->conf);
     mbedtls_x509_crt_free(&c->trust);
+    mbedtls_x509_crl_free(&c->crl);
     mbedtls_x509_crt_free(&c->own_cert);
     mbedtls_pk_free(&c->own_key);
     for (int32_t i = 0; i < c->alpn_count; i++) free(c->alpn[i]);
@@ -133,7 +155,7 @@ int32_t ktls_config_verify(ktls_config *c, int32_t mode)
 
 static void ktls_config_apply_trust(ktls_config *c)
 {
-    mbedtls_ssl_conf_ca_chain(&c->conf, c->trust_loaded ? &c->trust : NULL, NULL);
+    mbedtls_ssl_conf_ca_chain(&c->conf, c->trust_loaded ? &c->trust : NULL, c->crl_loaded ? &c->crl : NULL);
 }
 
 int32_t ktls_config_trust_file(ktls_config *c, const char *path)
@@ -167,6 +189,45 @@ int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len)
     c->trust_loaded = 1;
     ktls_config_apply_trust(c);
     return rc;
+}
+
+int32_t ktls_config_crl_file(ktls_config *c, const char *path)
+{
+    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int rc = mbedtls_x509_crl_parse_file(&c->crl, path);
+    if (rc != 0) return rc;
+    c->crl_loaded = 1;
+    ktls_config_apply_trust(c);
+    return 0;
+}
+
+int32_t ktls_config_crl_pem(ktls_config *c, const uint8_t *data, size_t len)
+{
+    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    /* PEM wants the buffer NUL-terminated with the NUL counted; DER takes its exact length. */
+    static const char begin[] = "-----BEGIN";
+    int pem = 0;
+    for (size_t i = 0; !pem && i + (sizeof begin - 1) <= len; i++) pem = memcmp(data + i, begin, sizeof begin - 1) == 0;
+    int rc;
+    if (pem) {
+        uint8_t *copy = ktls_terminated(data, len);
+        if (copy == NULL) return KTLS_ERR_NOMEM;
+        rc = mbedtls_x509_crl_parse(&c->crl, copy, len + 1);
+        free(copy);
+    } else {
+        rc = mbedtls_x509_crl_parse_der(&c->crl, data, len);
+    }
+    if (rc != 0) return rc;
+    c->crl_loaded = 1;
+    ktls_config_apply_trust(c);
+    return 0;
+}
+
+int32_t ktls_config_crl_complete(ktls_config *c, int32_t on)
+{
+    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    c->crl_complete = on ? 1 : 0;
+    return 0;
 }
 
 static int32_t ktls_config_apply_identity(ktls_config *c)
@@ -405,11 +466,20 @@ int32_t ktls_close_notify(ktls_session *s)
 
 uint32_t ktls_verify_flags(const ktls_session *s) { return mbedtls_ssl_get_verify_result(&s->ssl); }
 
+/* Mbed TLS has no words for KTLS_BADCERT_NO_CRL (it would say "Unknown reason"), so it is set aside and said
+   here, after Mbed TLS's own reasons. */
+static const char ktls_no_crl_text[] = "No CRL from the certificate's issuer was loaded\n";
+
 size_t ktls_verify_text(uint32_t flags, uint8_t *buf, size_t cap)
 {
     char text[1024];
-    int n = mbedtls_x509_crt_verify_info(text, sizeof text, "", flags);
+    int n = mbedtls_x509_crt_verify_info(text, sizeof text, "", flags & ~(uint32_t)KTLS_BADCERT_NO_CRL);
     if (n < 0) n = 0;
+    if ((flags & ~(uint32_t)KTLS_BADCERT_NO_CRL) == 0) n = 0;
+    if ((flags & KTLS_BADCERT_NO_CRL) && (size_t)n + sizeof ktls_no_crl_text < sizeof text) {
+        memcpy(text + n, ktls_no_crl_text, sizeof ktls_no_crl_text - 1);
+        n += (int)(sizeof ktls_no_crl_text - 1);
+    }
     /* One reason per line, each ending in '\n'. They are joined with "; ", and each starts in lower case so the
        list reads inside a sentence ("certificate verify failed: the certificate validity has expired; …"). A
        reason that opens with an acronym ("CRL …") keeps it. */
@@ -697,5 +767,14 @@ int32_t ktls_protocol(const ktls_session *s)
 _Static_assert(KTLS_WANT_READ == -1 && KTLS_CLOSED == -2 && KTLS_TRUNCATED == -7, "stream.kama WANT_READ / CLOSED / TRUNCATED");
 _Static_assert(MBEDTLS_ERR_X509_CERT_VERIFY_FAILED == -9984, "stream.kama CERT_VERIFY_FAILED");
 _Static_assert(MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE == -30592, "stream.kama FATAL_ALERT");
+/* KTLS_BADCERT_NO_CRL must stay clear of every flag Mbed TLS defines. */
+_Static_assert((KTLS_BADCERT_NO_CRL & (MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_REVOKED | MBEDTLS_X509_BADCERT_CN_MISMATCH |
+               MBEDTLS_X509_BADCERT_NOT_TRUSTED | MBEDTLS_X509_BADCRL_NOT_TRUSTED | MBEDTLS_X509_BADCRL_EXPIRED |
+               MBEDTLS_X509_BADCERT_MISSING | MBEDTLS_X509_BADCERT_SKIP_VERIFY | MBEDTLS_X509_BADCERT_OTHER |
+               MBEDTLS_X509_BADCERT_FUTURE | MBEDTLS_X509_BADCRL_FUTURE | MBEDTLS_X509_BADCERT_KEY_USAGE |
+               MBEDTLS_X509_BADCERT_EXT_KEY_USAGE | MBEDTLS_X509_BADCERT_NS_CERT_TYPE | MBEDTLS_X509_BADCERT_BAD_MD |
+               MBEDTLS_X509_BADCERT_BAD_PK | MBEDTLS_X509_BADCERT_BAD_KEY | MBEDTLS_X509_BADCRL_BAD_MD |
+               MBEDTLS_X509_BADCRL_BAD_PK | MBEDTLS_X509_BADCRL_BAD_KEY)) == 0, "KTLS_BADCERT_NO_CRL collides");
+_Static_assert(KTLS_BADCERT_NO_CRL == 0x01000000, "config.kama BADCERT_NO_CRL");
 _Static_assert(MBEDTLS_SSL_VERSION_TLS1_2 == 771 && MBEDTLS_SSL_VERSION_TLS1_3 == 772, "TLS version numbers");
 _Static_assert(KTLS_ERR_NOMEM == -3 && KTLS_ERR_INPUT == -5, "config.kama error codes");
