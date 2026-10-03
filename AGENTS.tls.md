@@ -5,8 +5,9 @@ a publishable library needs. Both are written by `kama agents install` and are *
 is the project-specific third, and it is the one to edit.
 
 **Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.519**, declared as `"kama"`
-in every manifest here. Its first consumer is `@kama/postgres` (`../kama-postgres`). This package is not
-published until postgres has exercised its API, because a registry version is permanent.
+in every manifest here. Its first consumer is `@kama/postgres` (`../kama-postgres`), which exercised the whole API
+before 0.1.0 was published. A registry version is permanent: a change ships as a new version, and only on the
+maintainer's word.
 
 - **Mbed TLS is vendored, never linked.** `tools/vendor-mbedtls.sh` pins one release, `mbedtls-4.1.1.tar.bz2`
   with its bundled TF-PSA-Crypto, by SHA256. It owns `third_party/mbedtls/` and the generated `csources`

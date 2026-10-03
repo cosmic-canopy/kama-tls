@@ -6,7 +6,11 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
-Needs **kama ≥ 0.9.519**.
+## [0.1.0] — 2026-10-02
+
+The first published version. Needs **kama ≥ 0.9.519**; verified on kama 0.9.520 (the latest release), debug and
+release, on macOS arm64 and Linux aarch64, and exercised by `@kama/postgres` against PostgreSQL 14–19. The
+"Fixed" and "Changed" entries below record what changed while that work ran, before anything was published.
 
 ### Fixed
 - An identity whose key does not belong to its certificate is refused when it is loaded. Before, nothing compared

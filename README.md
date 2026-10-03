@@ -5,8 +5,13 @@ vendored and bound. It is a client **and** a server over any `ReliableStream` �
 or an in-memory pipe — and it is itself a `ReliableStream`, so a protocol written against the contract runs
 over TLS unchanged. The first consumer is [`@kama/postgres`](https://github.com/cosmic-canopy/kama-postgres).
 
-> **Status: not yet published.** `TlsStream` and `TlsConfig` work and are tested on macOS and Linux;
-> `@kama/postgres` exercising them is next (see [docs/ROADMAP.md](docs/ROADMAP.md)). Needs **kama ≥ 0.9.519**.
+```sh
+kama pkg add kama.json @kama/tls --version ^0.1.0     # from the official registry, registry.kama-lang.org
+```
+
+Needs **kama ≥ 0.9.519** — declared as `"kama": ">=0.9.519"` in the manifest, so an older compiler is refused by
+name. Tested, debug and release, on macOS arm64 and Linux aarch64; Windows is not supported yet (see
+[docs/ROADMAP.md](docs/ROADMAP.md)).
 
 ## Using it
 
