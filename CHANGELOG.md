@@ -6,7 +6,9 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
-Version 0.1.1. Needs **kama ≥ 0.9.523**.
+## [0.1.1] — 2026-10-03
+
+Needs **kama ≥ 0.9.523**.
 
 ### Added
 - What a registry shows and `kama pkg search` matches: a `description`, the `repository`
