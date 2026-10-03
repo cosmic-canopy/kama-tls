@@ -33,6 +33,9 @@ Needs **kama ≥ 0.9.519**.
   Copyright is Cosmic Canopy LLC and the kama contributors. Mbed TLS stays Apache-2.0 OR GPL-2.0-or-later.
 
 ### Added
+- Key logging for a debugger: `TlsStream.logKeys()` before the handshake, then `takeKeyLog()` gives the session's
+  NSS key-log lines (SSLKEYLOGFILE's format: CLIENT_RANDOM for TLS 1.2, the four traffic secrets for TLS 1.3), wiped
+  from the session as they are taken. Mbed TLS exports no TLS 1.3 EXPORTER_SECRET, which OpenSSL also logs.
 - An identity in two steps, so a failure says which: `TlsConfig.certificateChain(bytes)` (PEM or DER; the first
   certificate is this side's), then `privateKey(bytes, password)` (PEM or DER at its exact length, decrypted when a
   password is given), which must pair with that certificate or fails with code -8, "the private key does not

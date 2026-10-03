@@ -1,0 +1,83 @@
+// Key logging (SSLKEYLOGFILE's NSS format): both ends of a session log the same secrets, each line "LABEL <client
+// random> <secret>" in lower-case hex. TLS 1.3 logs its four traffic secrets, TLS 1.2 its master secret; a session that
+// did not ask logs nothing, and taking the lines empties the log.
+import { std::collections::DynamicArray,
+         tls::TlsConfig, tls::TlsError, tls::Verify, tls::TlsVersion,
+         tls_tests::check, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect, tls_tests::drive,
+         tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome };
+export { keylogTests };
+
+fn bool isHex(const ref string text) {
+    if (text.length() == 0) { return false; }
+    foreach (uint8 b in text) {
+        bool digit = b >= 48ui8 && b <= 57ui8;
+        bool lower = b >= 97ui8 && b <= 102ui8;
+        if (!digit && !lower) { return false; }
+    }
+    return true;
+}
+
+// A line's label, if the line is "LABEL <64 hex digits> <secretHex hex digits>"; "" otherwise.
+fn string labelOf(const ref string line, isize secretHex) {
+    DynamicArray<string> parts = DynamicArray.empty();
+    foreach (string p in line.split(separator: " ")) { parts.add(item: copy p); }
+    if (parts.length() != 3) { return ""; }
+    if (parts[1].length() != 64 || !isHex(text: parts[1])) { return ""; }
+    if (parts[2].length() != secretHex || !isHex(text: parts[2])) { return ""; }
+    return copy parts[0];
+}
+
+fn bool sameLines(const ref DynamicArray<string> a, const ref DynamicArray<string> b) {
+    if (a.length() != b.length()) { return false; }
+    foreach (string line in a) {
+        bool found = false;
+        foreach (string other in b) { if (other.equals(other: line)) { found = true; } }
+        if (!found) { return false; }
+    }
+    return true;
+}
+
+unsafe fn int32 sessionCase(bool tls12, bool log, const ref string what) {
+    int32 f = 0;
+    string ca = "ca.crt";
+    string crt = "server.crt"; string key = "server.key";
+    string localhost = "localhost";
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": client config")); } };
+    if (tls12) { Result<Unit, TlsError> pin = client.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12); }
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: crt, keyName: key);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": server config")); } };
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": session")); } };
+    if (log) { pair.c().logKeys(); pair.s().logKeys(); }
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    f = f + check(ok: completed(o: o), what: what.concat(other: ": handshake (").concat(other: describe(o: o)).concat(other: ")"));
+    DynamicArray<string> mine = pair.c().takeKeyLog();
+    DynamicArray<string> theirs = pair.s().takeKeyLog();
+    if (!log) { return f + check(ok: mine.length() == 0, what: what.concat(other: ": nothing is logged unless asked")); }
+    f = f + check(ok: sameLines(a: mine, b: theirs), what: what.concat(other: ": both ends log the same lines"));
+    DynamicArray<string> want = DynamicArray.empty();
+    // A TLS 1.2 master secret is 48 bytes; a TLS 1.3 secret is as long as the suite's hash.
+    isize secretHex = 96;
+    string suite = pair.c().cipherSuite();
+    if (!tls12 && !suite.contains(substring: "SHA384")) { secretHex = 64; }
+    if (tls12) { want.add(item: "CLIENT_RANDOM"); }
+    else {
+        want.add(item: "CLIENT_HANDSHAKE_TRAFFIC_SECRET"); want.add(item: "SERVER_HANDSHAKE_TRAFFIC_SECRET");
+        want.add(item: "CLIENT_TRAFFIC_SECRET_0"); want.add(item: "SERVER_TRAFFIC_SECRET_0");
+    }
+    DynamicArray<string> labels = DynamicArray.empty();
+    foreach (string line in mine) { labels.add(item: labelOf(line: line, secretHex: secretHex)); }
+    f = f + check(ok: sameLines(a: labels, b: want), what: what.concat(other: ": the lines are ").concat(other: want[0]).concat(other: "…, well formed"));
+    DynamicArray<string> again = pair.c().takeKeyLog();
+    f = f + check(ok: again.length() == 0, what: what.concat(other: ": taking the lines empties the log"));
+    return f;
+}
+
+unsafe fn int32 keylogTests() {
+    int32 f = 0;
+    f = f + sessionCase(tls12: false, log: true, what: "keylog: TLS 1.3");
+    f = f + sessionCase(tls12: true, log: true, what: "keylog: TLS 1.2");
+    f = f + sessionCase(tls12: false, log: false, what: "keylog: off");
+    return f;
+}

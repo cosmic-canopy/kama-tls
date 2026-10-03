@@ -390,6 +390,7 @@ struct ktls_session {
     int32_t eof;       /* the transport ended: once `in` is empty, the engine sees end of stream */
     int32_t cert_requested;   /* a client: the server sent a CertificateRequest */
     char *sni;                /* a server: the name the client sent as SNI, NULL if none */
+    ktls_buffer keylog;       /* NSS key-log lines not yet taken (ktls_session_keylog) */
 };
 
 /* A server records the name a client asked for. Any name is accepted: the session serves its one identity. */
@@ -486,6 +487,7 @@ void ktls_session_free(ktls_session *s)
     mbedtls_ssl_free(&s->ssl);
     ktls_buffer_free(&s->in);
     ktls_buffer_free(&s->out);
+    ktls_buffer_free(&s->keylog);
     ktls_config_release(s->config);
     free(s->sni);
     free(s);
@@ -531,6 +533,62 @@ int32_t ktls_handshake(ktls_session *s)
 }
 
 int32_t ktls_cert_requested(const ktls_session *s) { return s->cert_requested; }
+
+/* NSS key-log lines (the SSLKEYLOGFILE format Wireshark reads): "LABEL <client random> <secret>", both in lower-case
+   hex. TLS 1.2 gives one CLIENT_RANDOM line with the master secret; TLS 1.3 its traffic secrets. Mbed TLS exports no
+   1.3 EXPORTER_SECRET, which OpenSSL also logs. */
+static void ktls_export_key(void *ctx, mbedtls_ssl_key_export_type type, const unsigned char *secret, size_t secret_len,
+                            const unsigned char client_random[32], const unsigned char server_random[32],
+                            mbedtls_tls_prf_types prf)
+{
+    (void)server_random; (void)prf;
+    ktls_session *s = ctx;
+    const char *label = NULL;
+    switch (type) {
+        case MBEDTLS_SSL_KEY_EXPORT_TLS12_MASTER_SECRET: label = "CLIENT_RANDOM"; break;
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_EARLY_SECRET: label = "CLIENT_EARLY_TRAFFIC_SECRET"; break;
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_EARLY_EXPORTER_SECRET: label = "EARLY_EXPORTER_SECRET"; break;
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_HANDSHAKE_TRAFFIC_SECRET: label = "CLIENT_HANDSHAKE_TRAFFIC_SECRET"; break;
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_SERVER_HANDSHAKE_TRAFFIC_SECRET: label = "SERVER_HANDSHAKE_TRAFFIC_SECRET"; break;
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_CLIENT_APPLICATION_TRAFFIC_SECRET: label = "CLIENT_TRAFFIC_SECRET_0"; break;
+        case MBEDTLS_SSL_KEY_EXPORT_TLS1_3_SERVER_APPLICATION_TRAFFIC_SECRET: label = "SERVER_TRAFFIC_SECRET_0"; break;
+        default: return;
+    }
+    static const char digits[] = "0123456789abcdef";
+    char line[64 + 1 + 64 + 1 + 2 * 128 + 2];
+    size_t n = strlen(label);
+    if (secret_len > 128) return;
+    memcpy(line, label, n);
+    line[n++] = ' ';
+    for (size_t i = 0; i < 32; i++) { line[n++] = digits[client_random[i] >> 4]; line[n++] = digits[client_random[i] & 15]; }
+    line[n++] = ' ';
+    for (size_t i = 0; i < secret_len; i++) { line[n++] = digits[secret[i] >> 4]; line[n++] = digits[secret[i] & 15]; }
+    line[n++] = '\n';
+    ktls_buffer_append(&s->keylog, (const uint8_t *)line, n);
+    mbedtls_platform_zeroize(line, sizeof line);
+}
+
+int32_t ktls_session_keylog(ktls_session *s)
+{
+    mbedtls_ssl_set_export_keys_cb(&s->ssl, ktls_export_key, s);
+    return 0;
+}
+
+size_t ktls_keylog_pending(const ktls_session *s) { return s->keylog.end - s->keylog.start; }
+
+/* Up to cap bytes of key-log text, taken: what is copied out is wiped from the session. */
+size_t ktls_keylog_take(ktls_session *s, uint8_t *buf, size_t cap)
+{
+    size_t n = s->keylog.end - s->keylog.start;
+    if (n > cap) n = cap;
+    if (n > 0) {
+        memcpy(buf, s->keylog.data + s->keylog.start, n);
+        mbedtls_platform_zeroize(s->keylog.data + s->keylog.start, n);
+        s->keylog.start += n;
+        if (s->keylog.start == s->keylog.end) s->keylog.start = s->keylog.end = 0;
+    }
+    return n;
+}
 
 /* Received bytes not yet handed to the caller: plaintext Mbed TLS has decrypted, and ciphertext fed but not yet
    taken. A caller about to wait for the transport must read these first. */

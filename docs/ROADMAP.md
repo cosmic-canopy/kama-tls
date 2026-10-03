@@ -6,7 +6,7 @@ every gap this package filed (KTLS-1 to KTLS-3), and it now needs that compiler.
 `@kama/postgres` phase 6 needs, in order, failures in words (alerts, keys, `reason()`) and the RFC 5929 fix
 (done); chain verification without SNI and certificate names, parsed from a session or a file (done); CRLs with OpenSSL's
 check-all rule (done); whether the server asked for a client certificate (done); a step-wise identity (done); and, last, key
-export for `sslkeylogfile`.
+export for `sslkeylogfile` (done).
 
 | # | phase | state |
 |---|---|---|

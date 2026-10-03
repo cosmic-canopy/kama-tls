@@ -42,6 +42,9 @@ extern fn int32 ktls_protocol(UnsafePtr s);
 extern fn int32 ktls_cert_requested(UnsafePtr s);
 extern fn usize ktls_in_pending(UnsafePtr s);
 extern fn int32 ktls_key_bits(UnsafePtr s);
+extern fn int32 ktls_session_keylog(UnsafePtr s);
+extern fn usize ktls_keylog_pending(UnsafePtr s);
+extern fn usize ktls_keylog_take(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_sni(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
 
@@ -241,6 +244,33 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         if (v == 771) { return Optional::Some(value: TlsVersion::Tls12); }
         if (v == 772) { return Optional::Some(value: TlsVersion::Tls13); }
         return Optional::None;
+    }
+
+    // Log this session's keys, for a debugger reading its traffic (what OpenSSL's SSLKEYLOGFILE and libpq's
+    // sslkeylogfile write): call it before the handshake, then take the lines with `takeKeyLog()`. The lines are the
+    // session's secrets; handle them as such.
+    public unsafe fn void logKeys() { int32 on = ktls_session_keylog(s: this.session); }
+
+    // The NSS key-log lines made since the last call ("CLIENT_RANDOM …", "CLIENT_TRAFFIC_SECRET_0 …"), each without
+    // its newline. They are wiped from the session as they are taken.
+    public unsafe fn DynamicArray<string> takeKeyLog() {
+        DynamicArray<string> lines = DynamicArray.empty();
+        isize n = cast<isize>(ktls_keylog_pending(s: this.session));
+        if (n == 0) { return lines; }
+        FixedArray<uint8> buf = FixedArray.make(size: n);
+        isize got = cast<isize>(ktls_keylog_take(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(n)));
+        isize start = 0;
+        isize i = 0;
+        while (i < got) {
+            if (buf[i] == 10ui8) {
+                lines.add(item: kama_string_from_raw(src: buf.dataPtr(), start: start, len: i - start));
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        i = 0;
+        while (i < got) { buf[i] = 0ui8; i = i + 1; }   // the copy in kama's memory is a secret too
+        return lines;
     }
 
     // The negotiated cipher's key size in bits (128 for AES-128-GCM, 256 for AES-256-GCM and ChaCha20); 0 before

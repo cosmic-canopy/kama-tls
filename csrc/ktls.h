@@ -115,6 +115,11 @@ int32_t ktls_protocol(const ktls_session *s);                             /* 0x0
 int32_t ktls_cert_requested(const ktls_session *s);  /* a client: 1 once the server has asked for a certificate */
 size_t ktls_in_pending(const ktls_session *s);       /* received bytes a read would answer without the transport */
 int32_t ktls_key_bits(const ktls_session *s);        /* the negotiated cipher's key size in bits; 0 before */
+/* Key logging, for a debugger reading the session (SSLKEYLOGFILE): turned on before the handshake, it collects NSS
+   key-log lines as the secrets are made, to be taken (and wiped) with ktls_keylog_take. */
+int32_t ktls_session_keylog(ktls_session *s);
+size_t ktls_keylog_pending(const ktls_session *s);
+size_t ktls_keylog_take(ktls_session *s, uint8_t *buf, size_t cap);
 size_t ktls_sni(const ktls_session *s, uint8_t *buf, size_t cap);          /* a server: the SNI received; 0 if none */
 
 /* ---- a certificate on its own ----------------------------------------------------------------------------
