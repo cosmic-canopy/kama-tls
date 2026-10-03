@@ -24,8 +24,10 @@
 #   empty.crl                    the CA's CRL before the revocation: lists nothing
 #   other-ca.crl                 an empty CRL from the untrusted CA, so a CRL set can lack the trusted CA's
 #
-# Every leaf is signed with `openssl ca`, which takes explicit validity dates on both LibreSSL and OpenSSL
-# (the newer `x509 -not_before` is OpenSSL 3.4+ only). OPENSSL picks the binary (default `openssl`).
+# Every leaf is signed with `openssl ca`, which takes explicit validity dates on every OpenSSL 3 (the newer
+# `x509 -not_before` is 3.4+ only). OPENSSL picks the binary (default `openssl`). It must be OpenSSL, not the
+# LibreSSL macOS ships as /usr/bin/openssl: LibreSSL cannot choose PBES2's PRF, and its default is HMAC-SHA1,
+# so client-pkcs8.key would quietly test something else. On macOS: OPENSSL=$(brew --prefix openssl@3)/bin/openssl.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -38,6 +40,10 @@ KEY_PASSWORD='kama-tls test key pw'
 if [ "$(cat "$DIR/.generation" 2>/dev/null)" = "$GENERATION" ] && [ "${1:-}" != "--force" ]; then
     exit 0
 fi
+case "$("$OPENSSL" version 2>/dev/null)" in
+    OpenSSL\ [3-9]*) ;;
+    *) echo "gen-certs: $OPENSSL is $("$OPENSSL" version 2>/dev/null || echo "not runnable"); OpenSSL 3 or later is needed (set OPENSSL)" >&2; exit 1 ;;
+esac
 rm -rf "$DIR"
 mkdir -p "$DIR/work"
 cd "$DIR/work"
