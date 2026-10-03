@@ -35,7 +35,7 @@ jobs:
       # Raise it deliberately, in the same commit that raises the manifests' "kama" floor.
       - name: Install kama
         env:
-          KAMA_VERSION: v0.9.520
+          KAMA_VERSION: v0.9.523
         run: |
           curl -fsSL https://kama-lang.org/install.sh | sh
           echo "$HOME/.kama/bin" >> "$GITHUB_PATH"

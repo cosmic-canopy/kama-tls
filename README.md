@@ -9,8 +9,8 @@ over TLS unchanged. The first consumer is [`@kama/postgres`](https://github.com/
 kama pkg add kama.json @kama/tls --version ^0.1.0     # from the official registry, registry.kama-lang.org
 ```
 
-Needs **kama ≥ 0.9.519** — declared as `"kama": ">=0.9.519"` in the manifest, so an older compiler is refused by
-name. Tested, debug and release, on macOS arm64 and Linux aarch64; Windows is not supported yet (see
+Needs **kama ≥ 0.9.523** — declared as `"kama": ">=0.9.523"` in the manifest, so an older compiler is refused by
+name. (0.1.0 needed 0.9.519; 0.1.1 raised the floor only for the registry's metadata keys.) Tested, debug and release, on macOS arm64 and Linux aarch64; Windows is not supported yet (see
 [docs/ROADMAP.md](docs/ROADMAP.md)).
 
 ## Using it

@@ -6,6 +6,17 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
+Version 0.1.1. Needs **kama ≥ 0.9.523**.
+
+### Added
+- What a registry shows and `kama pkg search` matches: a `description`, the `repository`
+  (https://github.com/cosmic-canopy/kama-tls) and the keywords `ssl`, `mbedtls`, `x509`, `crypto` and `networking`.
+
+### Changed
+- The `kama` floor is 0.9.523, the release that introduced those manifest keys. The code is unchanged. Note: a
+  registry index does not carry the floor yet, so a `^0.1.0` dependency resolves to 0.1.1 and an older compiler is
+  told to update at install.
+
 ## [0.1.0] — 2026-10-02
 
 The first published version. Needs **kama ≥ 0.9.519**; verified on kama 0.9.520 (the latest release), debug and

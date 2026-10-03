@@ -5,7 +5,8 @@ macOS arm64 and Linux aarch64, on kama 0.9.519. `@kama/postgres` phase 6 exercis
 (its whole suite runs over TLS too), and asked for what it lacked, now added: failures in words (alerts by name, key
 and PEM errors), the RFC 5929 SHA-224 fix, chain verification without SNI, certificate names from a session or a
 file, CRLs with OpenSSL's every-certificate rule, whether the server asked for a client certificate, a step-wise
-identity with a pair check, and key logging. 0.1.0 is published on the official registry.
+identity with a pair check, and key logging. 0.1.0 is published on the official registry. 0.1.1, unreleased,
+adds what the registry shows and searches (a description, the repository, keywords), so it needs kama 0.9.523.
 
 | # | phase | state |
 |---|---|---|

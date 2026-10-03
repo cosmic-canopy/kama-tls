@@ -4,11 +4,15 @@ The two generated files carry the general rules: `AGENTS.md` is the language, `A
 a publishable library needs. Both are written by `kama agents install` and are **not** hand-edited. This file
 is the project-specific third, and it is the one to edit.
 
-**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.519**, declared as `"kama"`
+**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.523**, declared as `"kama"`
 in every manifest here. Its first consumer is `@kama/postgres` (`../kama-postgres`), which exercised the whole API
 before 0.1.0 was published. A registry version is permanent: a change ships as a new version, and only on the
 maintainer's word.
 
+- **What the registry shows comes from `kama.json`:** `description`, `repository` and `keywords`, which `kama
+  pkg search` and registry.kama-lang.org read. `kama publish` copies them into the version's index entry, and an
+  entry is write-once, so a change reaches the registry only with a new version. The keys are new in kama
+  0.9.523, and `kama publish` refuses them under a lower `"kama"` floor.
 - **Mbed TLS is vendored, never linked.** `tools/vendor-mbedtls.sh` pins one release, `mbedtls-4.1.1.tar.bz2`
   with its bundled TF-PSA-Crypto, by SHA256. It owns `third_party/mbedtls/` and the generated `csources`
   and `cincludes` blocks of `kama.json`, so do not hand-edit any of them. The release tarball carries the
