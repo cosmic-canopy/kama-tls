@@ -105,6 +105,11 @@ fn int32 revocationTests() {
     Outcome o9 = attempt(certName: revokedCrt, keyName: revokedKey, sources: one(source: revokedFile), mode: Revocation::Complete);
     f = f + check(ok: rejected(o: o9, want: BADCERT_REVOKED), what: "crl: Complete still rejects a revoked certificate (".concat(other: describe(o: o9)).concat(other: ")"));
 
+    // Complete with no CRL loaded at all: nothing is covered, so the chain fails, as OpenSSL's CRL_CHECK_ALL fails it.
+    DynamicArray<string> none = DynamicArray.empty();
+    Outcome o10 = attempt(certName: srvCrt, keyName: srvKey, sources: none, mode: Revocation::Complete);
+    f = f + check(ok: rejected(o: o10, want: BADCERT_NO_CRL), what: "crl: Complete with no CRL rejects the chain (".concat(other: describe(o: o10)).concat(other: ")"));
+
     // A CRL file that is not there is a configuration error, not a silent pass.
     Result<TlsConfig, TlsError> made = TlsConfig.client();
     TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return f + check(ok: false, what: "crl: client config"); } };

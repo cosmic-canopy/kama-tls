@@ -93,7 +93,9 @@ static int ktls_verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t 
 {
     const ktls_config *c = ctx;
     if (!c->server && c->verify == 1 && depth == 0) *flags &= ~(uint32_t)MBEDTLS_X509_BADCERT_CN_MISMATCH;
-    if (c->crl_complete && c->crl_loaded) {
+    /* With no CRL loaded at all, nothing is covered: OpenSSL fails such a chain too ("unable to get certificate CRL"),
+       as libpq sees when sslcrldir names a directory that holds none. */
+    if (c->crl_complete) {
         int covered = 0;
         for (const mbedtls_x509_crl *crl = &c->crl; crl != NULL && !covered; crl = crl->next) {
             covered = crl->version != 0 && crl->issuer_raw.len == crt->issuer_raw.len &&
