@@ -35,7 +35,8 @@ A `TlsStream` is a `ReliableStream`, so `writeAll`, `BufReader` and every protoc
 work over it. A server is the same with `TlsConfig.server()`, an identity (`identityFiles` / `identityPem`), and
 `TlsStream.server(inner:, config:)`. One configuration serves every session, on any isolate (`share()` hands out
 another handle). After the handshake: `protocolVersion()`, `cipherSuite()`, `alpnProtocol()`,
-`peerCertificate()` (DER), and `tlsServerEndPoint()` — the RFC 5929 channel binding SCRAM-SHA-256-PLUS needs.
+`peerCertificate()` (DER), and the channel bindings a SCRAM-…-PLUS login folds in: `tlsServerEndPoint()` (RFC 5929,
+TLS 1.2 and 1.3, the one PostgreSQL uses) and `tlsExporter()` (RFC 9266 tls-exporter, TLS 1.3 only).
 
 A failed handshake says why as data: `TlsError::Certificate(flags, reasons)` names every check the peer's
 certificate failed ("The certificate validity has expired", "The certificate Common Name (CN) does not match…").

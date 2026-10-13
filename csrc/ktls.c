@@ -29,6 +29,11 @@
 
 #include "ssl_misc.h"
 
+/* tlsExporter() (RFC 9266) is mbedtls_ssl_export_keying_material: a configuration without it has no binding. */
+#if !defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT)
+#error "MBEDTLS_SSL_KEYING_MATERIAL_EXPORT is off: TlsStream.tlsExporter() (RFC 9266 tls-exporter) needs it"
+#endif
+
 /* ---- process setup -------------------------------------------------------------------------------------- */
 
 static atomic_int ktls_ready = 0;
@@ -830,6 +835,22 @@ static size_t ktls_end_point_of(const mbedtls_x509_crt *crt, uint8_t *buf, size_
 size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap)
 {
     return ktls_end_point_of(mbedtls_ssl_get_peer_cert(&s->ssl), buf, cap);
+}
+
+/* RFC 9266 tls-exporter: 32 bytes of the TLS exporter (RFC 8446 §7.5) with the label "EXPORTER-Channel-Binding" and
+   an empty context. TLS 1.3 only: RFC 9266 allows TLS 1.2 only with extended master secret, and tls-server-end-point
+   already covers 1.2. 0 before the handshake is over. */
+size_t ktls_exporter(ktls_session *s, uint8_t *buf, size_t cap)
+{
+    if (!mbedtls_ssl_is_handshake_over(&s->ssl)) return 0;
+    if (mbedtls_ssl_get_version_number(&s->ssl) != MBEDTLS_SSL_VERSION_TLS1_3) return 0;
+    static const char label[] = "EXPORTER-Channel-Binding";
+    uint8_t value[32];
+    size_t n = 0;
+    if (mbedtls_ssl_export_keying_material(&s->ssl, value, sizeof value, label, sizeof label - 1, NULL, 0, 0) == 0)
+        n = ktls_copy_out(value, sizeof value, buf, cap);
+    mbedtls_platform_zeroize(value, sizeof value);
+    return n;
 }
 
 /* The names a certificate carries, for a caller that compares them itself (libpq's host-name check), as records

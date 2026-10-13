@@ -31,7 +31,7 @@ maintainer's word.
   - a once-guard over `psa_crypto_init`;
   - the memory-BIO session (phase 2);
   - error text into a caller buffer;
-  - the RFC 5929 end-point hash;
+  - the RFC 5929 end-point hash and the RFC 9266 tls-exporter value;
   - a `_Static_assert` per size kama spells as a literal.
 
   Entropy is Mbed TLS's builtin source (getrandom / getentropy / BCryptGenRandom).

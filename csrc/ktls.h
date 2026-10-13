@@ -106,6 +106,8 @@ size_t ktls_peer_cert(const ktls_session *s, uint8_t *buf, size_t cap);   /* DER
 /* RFC 5929 tls-server-end-point: MD5 and SHA-1 signatures hash with SHA-256, every other one with its own hash.
    0 when there is no peer certificate, or its signature's hash is not one PostgreSQL would use either. */
 size_t ktls_end_point(const ktls_session *s, uint8_t *buf, size_t cap);
+/* RFC 9266 tls-exporter: 32 bytes, the same at both ends of a session. 0 before the handshake is over and on TLS 1.2. */
+size_t ktls_exporter(ktls_session *s, uint8_t *buf, size_t cap);
 /* The peer certificate's names, as records of [kind u8][length u16 big-endian][raw bytes]: subjectAltName dNSName
    (1) and iPAddress (2) entries in certificate order, then every subject commonName (3). 0 when there is none. */
 size_t ktls_peer_names(const ktls_session *s, uint8_t *buf, size_t cap);

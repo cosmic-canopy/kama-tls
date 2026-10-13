@@ -6,6 +6,14 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
+Version 0.1.2. Needs **kama ≥ 0.9.523**.
+
+### Added
+- `TlsStream.tlsExporter()`: the RFC 9266 tls-exporter channel binding, 32 bytes of the TLS exporter under the label
+  `EXPORTER-Channel-Binding` with an empty context ([#1](https://github.com/cosmic-canopy/kama-tls/issues/1)). TLS 1.3
+  only: it is empty before the handshake completes and on a TLS 1.2 session, where RFC 9266 needs extended master
+  secret and `tlsServerEndPoint()` is the binding. Checked against OpenSSL 3.6.4's `s_server -keymatexport`.
+
 ## [0.1.1] — 2026-10-03
 
 Needs **kama ≥ 0.9.523**.

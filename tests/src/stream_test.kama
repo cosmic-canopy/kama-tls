@@ -1,5 +1,5 @@
 // What a completed session does: versions, ALPN, client certificates, data in both directions at size, an
-// orderly close against a truncation, and the channel binding SCRAM-SHA-256-PLUS relies on.
+// orderly close against a truncation, and the channel bindings (RFC 5929 tls-server-end-point, RFC 9266 tls-exporter).
 import { core::println, std::io::IoError, std::io::IoErrorKind, std::io::writeAll, std::collections::DynamicArray,
          std::collections::FixedArray, std::collections::ConstView, std::fs::readText,
          std::encoding::base64::decode as b64decode, std::encoding::base64::DecodeError,
@@ -300,6 +300,7 @@ fn int32 channelBindingTests() {
     int32 f = 0;
     TlsConfig c = mustClient();
     TlsConfig s = mustServer();
+    DynamicArray<uint8> first = DynamicArray.empty();
     Setup d = ready(client: c, server: s);
     match (give d) {
         case Ready(session: p): {
@@ -311,8 +312,43 @@ fn int32 channelBindingTests() {
             DynamicArray<uint8> endPoint = p.c().tlsServerEndPoint();
             InlineArray<uint8>#(32) want = sha256(bytes: der.view());
             f = f + check(ok: endPoint.length() == 32 && sameBytes(a: endPoint.view(), b: want.view()), what: "binding: tls-server-end-point is SHA-256 of the DER");
+            // RFC 9266 tls-exporter, under TLS 1.3 (the default): both ends derive the same 32 bytes.
+            first = p.c().tlsExporter();
+            DynamicArray<uint8> theirs = p.s().tlsExporter();
+            f = f + check(ok: first.length() == 32 && sameBytes(a: first.view(), b: theirs.view()), what: "binding: tls-exporter is the same 32 bytes at both ends");
         }
         case Failed(why: w): { f = f + check(ok: false, what: "binding: handshake (".concat(other: w).concat(other: ")")); }
+    };
+
+    // Another session from the same configurations: none before its handshake, then different bytes.
+    string localhost = "localhost";
+    Result<Session, TlsError> made = connect(client: c, server: s, name: localhost);
+    match (give made) {
+        case Ok(value: p): {
+            DynamicArray<uint8> early = p.c().tlsExporter();
+            f = f + check(ok: early.length() == 0, what: "binding: no tls-exporter before the handshake");
+            Outcome o = drive(c: p.c(), s: p.s());
+            f = f + check(ok: completed(o: o), what: "binding: a second handshake (".concat(other: describe(o: o)).concat(other: ")"));
+            DynamicArray<uint8> second = p.c().tlsExporter();
+            f = f + check(ok: second.length() == 32 && !sameBytes(a: first.view(), b: second.view()), what: "binding: another session's tls-exporter differs");
+        }
+        case Err(error: e): { f = f + check(ok: false, what: "binding: a second session"); }
+    };
+
+    // Under TLS 1.2 there is none, on either side.
+    TlsConfig c12 = mustClient();
+    Result<Unit, TlsError> pin = c12.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12);
+    bool pinned = match (give pin) { case Ok(value: u): true; case Err(error: e): false; };
+    TlsConfig s12 = mustServer();
+    Setup d12 = ready(client: c12, server: s12);
+    match (give d12) {
+        case Ready(session: p): {
+            bool is12 = pinned && isVersion(v: p.c().protocolVersion(), want: TlsVersion::Tls12);
+            DynamicArray<uint8> ours = p.c().tlsExporter();
+            DynamicArray<uint8> theirs = p.s().tlsExporter();
+            f = f + check(ok: is12 && ours.length() == 0 && theirs.length() == 0, what: "binding: no tls-exporter under TLS 1.2");
+        }
+        case Failed(why: w): { f = f + check(ok: false, what: "binding: TLS 1.2 handshake (".concat(other: w).concat(other: ")")); }
     };
     return f;
 }

@@ -35,6 +35,7 @@ extern fn int32 ktls_fatal_alert(UnsafePtr s);
 extern fn usize ktls_alert_name(int32 description, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_peer_cert(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_end_point(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn usize ktls_exporter(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_peer_names(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_alpn(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_ciphersuite(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
@@ -217,6 +218,13 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         return this.bytesFrom(which: 1);
     }
 
+    // RFC 9266 tls-exporter channel binding: 32 bytes of the TLS exporter under the label "EXPORTER-Channel-Binding",
+    // the same at both ends of one session and different in every other. Empty before the handshake completes and
+    // under TLS 1.2, where RFC 9266 needs extended master secret; there `tlsServerEndPoint()` is the binding.
+    public unsafe fn DynamicArray<uint8> tlsExporter() {
+        return this.bytesFrom(which: 6);
+    }
+
     // The names on the peer's certificate (subjectAltName dNSName and iPAddress entries, then subject commonNames),
     // for a caller that checks a host name itself; none when the peer sent no certificate.
     public unsafe fn CertificateNames peerNames() {
@@ -394,7 +402,8 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
     }
 
     // One of the byte answers, at its full length: 0 the peer certificate, 1 the end-point hash, 2 the ALPN
-    // protocol, 3 the cipher suite, 4 the peer certificate's names, 5 the SNI a server received.
+    // protocol, 3 the cipher suite, 4 the peer certificate's names, 5 the SNI a server received, 6 the
+    // tls-exporter value.
     unsafe fn DynamicArray<uint8> bytesFrom(int32 which) {
         isize cap = 256;
         while (true) {
@@ -405,6 +414,7 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
             else if (which == 2) { got = ktls_alpn(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else if (which == 4) { got = ktls_peer_names(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else if (which == 5) { got = ktls_sni(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
+            else if (which == 6) { got = ktls_exporter(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             else { got = ktls_ciphersuite(s: this.session, buf: buf.dataPtrMut(), cap: cast<usize>(cap)); }
             isize n = cast<isize>(got);
             if (n <= cap) {
