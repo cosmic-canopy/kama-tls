@@ -6,7 +6,9 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
-Version 0.1.2. Needs **kama ≥ 0.9.523**.
+## [0.1.2] — 2026-10-13
+
+Needs **kama ≥ 0.9.523**.
 
 ### Added
 - `TlsStream.tlsExporter()`: the RFC 9266 tls-exporter channel binding, 32 bytes of the TLS exporter under the label

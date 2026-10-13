@@ -7,7 +7,7 @@ and PEM errors), the RFC 5929 SHA-224 fix, chain verification without SNI, certi
 file, CRLs with OpenSSL's every-certificate rule, whether the server asked for a client certificate, a step-wise
 identity with a pair check, and key logging. 0.1.0 is published on the official registry. 0.1.1 (2026-10-03)
 adds what the registry shows and searches (a description, the repository, keywords), so it needs kama 0.9.523.
-0.1.2, unpublished, adds the RFC 9266 tls-exporter channel binding, `TlsStream.tlsExporter()` (phase 4).
+0.1.2 (2026-10-13) adds the RFC 9266 tls-exporter channel binding, `TlsStream.tlsExporter()` (phase 4).
 
 | # | phase | state |
 |---|---|---|
@@ -16,7 +16,7 @@ adds what the registry shows and searches (a description, the repository, keywor
 | 2 | `TlsStream<S: ReliableStream>` over a memory BIO: handshake step (WantRead / WantWrite), read, write, close_notify; `TlsConfig` (trust roots from a file / PEM bytes / the system bundle, identity, verify full / ca-only / none, SNI, ALPN, versions); peer certificate DER and the RFC 5929 end-point hash. Tests: TLS 1.2 and 1.3, every verify mode, wrong host, untrusted CA, expired, client certificate required, ALPN, a large transfer, close_notify against truncation — over an in-memory pipe, and once over loopback TCP | **done** |
 | 3 | Exercised by `@kama/postgres` (sslmode matrix, SCRAM-SHA-256-PLUS, client certificates) against PostgreSQL 14–19 | **done** |
 | — | Publish 0.1.0, before `@kama/postgres` | **done** (2026-10-02) |
-| 4 | RFC 9266 tls-exporter channel binding as `TlsStream.tlsExporter()`, TLS 1.3 only ([issue #1](https://github.com/cosmic-canopy/kama-tls/issues/1)); see [Channel bindings](#channel-bindings) | **done** (0.1.2, unpublished) |
+| 4 | RFC 9266 tls-exporter channel binding as `TlsStream.tlsExporter()`, TLS 1.3 only ([issue #1](https://github.com/cosmic-canopy/kama-tls/issues/1)); see [Channel bindings](#channel-bindings) | **done** (0.1.2, 2026-10-13) |
 
 Windows is out of scope for 0.1.0: threading there needs `MBEDTLS_THREADING_ALT` with Windows mutexes, and it has never been built.
 
@@ -49,8 +49,8 @@ XMPP package built on it.
     the same 32 bytes, and the commit that added it records them. The gate stays hermetic, so that check is not in
     `tools/test.sh`.
   - The README has a line beside `tlsServerEndPoint()`. `kama.json` is 0.1.2, and the `"kama"` floor stays at
-    0.9.523. The gate is green on macOS arm64 and Linux aarch64 (AGENTS.tls.md). Publishing waits for the
-    maintainer's word.
+    0.9.523. The gate is green on macOS arm64 and Linux aarch64 (AGENTS.tls.md), and CI is green on kama 0.9.523.
+    Published 2026-10-13.
 - **tls-unique** (RFC 5929): **not offered.** It is defined only up to TLS 1.2, where the triple-handshake attack
   breaks it without extended master secret. RFC 9266 replaces it for 1.3, and Mbed TLS has no public API for the
   Finished message it is made from.
