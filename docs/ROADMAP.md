@@ -11,9 +11,8 @@ it needs kama 0.9.523; 0.1.2 (2026-10-13), the RFC 9266 tls-exporter channel bin
 no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Sendable`. 0.1.4, unpublished, lets a
 server hold several identities and choose one per handshake by SNI (phase 5).
 
-**Next: phase 6, session resumption.** Start at [Session resumption](#session-resumption): it lists what Mbed TLS
-already has, the proposed API, the security checks each step needs, and the questions to settle with the maintainer
-first.
+**Next: phase 6, a race on shared configurations** ([Shared configurations](#shared-configurations)): a small fix
+with its design written, to ship as 0.1.5. Then phase 7, [session resumption](#session-resumption).
 
 | # | phase | state |
 |---|---|---|
@@ -24,8 +23,9 @@ first.
 | — | Publish 0.1.0 | **done** (2026-10-02) |
 | 4 | RFC 9266 tls-exporter channel binding as `TlsStream.tlsExporter()`, TLS 1.3 only ([issue #1](https://github.com/cosmic-canopy/kama-tls/issues/1)); see [Channel bindings](#channel-bindings) | **done** (0.1.2, 2026-10-13) |
 | 5 | A server holds several identities and serves each handshake the ones whose certificate names the SNI host; see [Server identities](#server-identities) | **done** (0.1.4, unpublished) |
-| 6 | Session resumption: tickets on the server, a resumable session on the client; see [Session resumption](#session-resumption) | **next** |
-| 7 | Windows; see [Windows](#windows) | **the maintainer's call** |
+| 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **next** (0.1.5) |
+| 7 | Session resumption: tickets on the server, a resumable session on the client; see [Session resumption](#session-resumption) | planned |
+| 8 | Windows; see [Windows](#windows) | **the maintainer's call** |
 
 ## Channel bindings
 
@@ -89,9 +89,45 @@ Phase 5, 0.1.4. A server can answer several host names from one listener, each w
   `tools/gen-certs.sh` (generation 6). It was also checked once against OpenSSL 3.6.4's `s_client`, which the
   commit records.
 
+## Shared configurations
+
+Phase 6, **next**, as 0.1.5. A data race found while building phase 5. It has not been seen to fail, and no test
+shows it yet.
+
+**The race.** `TlsConfig` is `Sendable`, and `share()` hands out another handle on the same C configuration.
+- Every setter checks `frozen` and then changes the configuration, as two steps.
+- `ktls_session_new` sets `frozen` and then reads the configuration (`mbedtls_ssl_setup`).
+
+So with two handles on two isolates:
+- two setters can change the configuration at once: the ALPN array, the trust chain, the CRLs, the identity list;
+- a setter that passed its check can still be changing the configuration while a session is set up from it.
+
+Either one is a C data race, which is undefined behavior, not just a wrong answer. A program that finishes
+configuring before it shares, the pattern the API documents, never hits it.
+
+**The fix.**
+- Add a mutex to `ktls_config`, using Mbed TLS's `mbedtls_mutex_*`, so it follows `MBEDTLS_THREADING_*` to Windows
+  later.
+- Every setter takes the mutex around its check and its change. So does `ktls_config_trust_count`, the one reader.
+- `ktls_session_new` takes it around its precondition checks and the store to `frozen`, then sets the session up
+  after releasing it. A frozen configuration cannot change.
+- The SNI and verify callbacks keep reading without a lock, because they run only after the freeze.
+- The API doesn't change, so this is a patch release, 0.1.5.
+
+**Rejected: freezing a configuration in `share()`.** It needs no lock, but a program that shares a configuration
+and then sets something on it, on one isolate, would get `-4` where it gets Ok today. That breaks callers, so it
+would have to be 0.2.0.
+
+**The test.**
+- Two isolates, each with a handle on one configuration: one calls setters in a loop while the other makes
+  sessions. Both must finish, and every setter must answer Ok or `-4`.
+- A plain run cannot prove a race is gone. So run the tests under ThreadSanitizer once before the fix and once
+  after (`-fsanitize=thread` in a `select` entry's `cflags` and `ldflags` on `tests/kama.json`; in the Linux
+  container if this host's toolchain will not run it). Before the fix it should report the race; after, nothing.
+
 ## Session resumption
 
-Phase 6, **next**. Neither side resumes a session today. Settle the open questions below with the maintainer, write
+Phase 7. Neither side resumes a session today. Settle the open questions below with the maintainer, write
 the decisions here, then build it as phases 4 and 5 were built: a design in this section, tests in `tests/`, the
 gate on macOS arm64 and Linux aarch64, and one version.
 
@@ -147,7 +183,7 @@ wire.
 
 ## Windows
 
-Phase 7, **the maintainer's call**. kama builds for Windows (`--target WINDOWS`, with mingw-w64 or zig), so whether
+Phase 8, **the maintainer's call**. kama builds for Windows (`--target WINDOWS`, with mingw-w64 or zig), so whether
 this package does is a scope decision, not a technical block. It has never been built there. What it takes:
 
 - **Threading.**
