@@ -1,9 +1,8 @@
 # Gaps found in kama, from building @kama/tls
 
-Found while building the TLS package that `@kama/postgres` depends on. It is written **for the cstar
-project**: each entry is reduced to the smallest program that shows it, and each was **run** on the
-version named, never inferred from the spec. This file is excluded from the published package, as it is
-in `@kama/sodium` and `@kama/postgres`. Gaps hit by postgres are in `../kama-postgres/KAMA_GAPS.md`.
+Found while building @kama/tls. It is written **for the cstar project**: each entry is reduced to the smallest
+program that shows it, and each was **run** on the version named, never inferred from the spec. This file is
+excluded from the published package.
 
 **Current compiler:** `kama 0.9.519+g28136440`, the dev build at `../cstar/out/Darwin-arm64/kama`. KTLS-1 to KTLS-3
 were re-run on it, each with the repro as filed, before moving to FIXED. They were filed against `0.9.486`.

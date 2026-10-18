@@ -46,7 +46,10 @@ int32_t ktls_config_trust_file(ktls_config *c, const char *path);   /* a PEM or 
 int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len);
 /* This side's identity, in two steps so a failure says which: the certificate chain (PEM or DER; the first
    certificate is this side's), then the private key (PEM or DER, decrypted with `password` when it has length),
-   which must pair with that certificate (KTLS_ERR_KEY_MISMATCH). One identity per configuration. */
+   which must pair with that certificate (KTLS_ERR_KEY_MISMATCH). A client holds one identity. A server may hold
+   several, each loaded the same way: a handshake serves the identities whose certificate names (subjectAltName
+   dNSNames, else the CN) cover the SNI name best, exact before "*." wildcard, and the first identity when the
+   client sent no SNI or a name none covers. A chain waiting for its key blocks another identity (KTLS_ERR_INPUT). */
 int32_t ktls_config_certificate_chain(ktls_config *c, const uint8_t *data, size_t len);
 int32_t ktls_config_private_key(ktls_config *c, const uint8_t *data, size_t len, const uint8_t *password, size_t password_len);
 /* Both steps at once: from files, or from bytes. `password` may be NULL / empty. */

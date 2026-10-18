@@ -3,7 +3,7 @@
 TLS for [kama](https://kama-lang.org): [Mbed TLS](https://www.trustedfirmware.org/projects/mbed-tls/) 4.1 LTS,
 vendored and bound. It is a client **and** a server over any `ReliableStream` — a `TcpStream`, a `UnixStream`,
 or an in-memory pipe — and it is itself a `ReliableStream`, so a protocol written against the contract runs
-over TLS unchanged. The first consumer is [`@kama/postgres`](https://github.com/cosmic-canopy/kama-postgres).
+over TLS unchanged.
 
 ```sh
 kama pkg add kama.json @kama/tls --version ^0.1.0     # from the official registry, registry.kama-lang.org
@@ -32,7 +32,8 @@ Result<TlsStream<TcpStream>, TlsError> tls = TlsStream::<TcpStream>.client(inner
 ```
 
 A `TlsStream` is a `ReliableStream`, so `writeAll`, `BufReader` and every protocol written against the contract
-work over it. A server is the same with `TlsConfig.server()`, an identity (`identityFiles` / `identityPem`), and
+work over it. A server is the same with `TlsConfig.server()`, an identity (`identityFiles` / `identityPem`; several,
+and each handshake serves the one whose certificate names the host the client asked for by SNI), and
 `TlsStream.server(inner:, config:)`. One configuration serves every session, on any isolate (`share()` hands out
 another handle). After the handshake: `protocolVersion()`, `cipherSuite()`, `alpnProtocol()`,
 `peerCertificate()` (DER), and the channel bindings a SCRAM-…-PLUS login folds in: `tlsServerEndPoint()` (RFC 5929,

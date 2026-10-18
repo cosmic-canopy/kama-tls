@@ -63,6 +63,15 @@ static int ktls_sni_seen(void *ctx, mbedtls_ssl_context *ssl, const unsigned cha
 
 #define KTLS_MAX_ALPN 8
 
+/* One identity: a certificate chain and the private key that pairs with its first certificate. A server may hold
+   several, in the order they were loaded, and serves each handshake the one whose certificate names the host the
+   client asked for (ktls_sni_seen); a client holds one. */
+typedef struct ktls_identity {
+    mbedtls_x509_crt cert;
+    mbedtls_pk_context key;
+    struct ktls_identity *next;
+} ktls_identity;
+
 struct ktls_config {
     atomic_int refs;
     atomic_int frozen;            /* set when the first session is made from it */
@@ -74,9 +83,8 @@ struct ktls_config {
     mbedtls_x509_crl crl;         /* every CRL loaded, a chain of them */
     int32_t crl_loaded;
     int32_t crl_complete;         /* OpenSSL's CRL_CHECK_ALL: every certificate in the chain needs its issuer's CRL */
-    mbedtls_x509_crt own_cert;
-    mbedtls_pk_context own_key;
-    int32_t own_loaded;
+    ktls_identity *identities;    /* complete identities, in load order; the first is the default */
+    ktls_identity *pending;       /* a chain loaded by certificate_chain, waiting for its key */
     char *alpn[KTLS_MAX_ALPN + 1];  /* NULL-terminated, as mbedtls_ssl_conf_alpn_protocols wants */
     int32_t alpn_count;
 };
@@ -131,8 +139,6 @@ ktls_config *ktls_config_new(int32_t server)
     mbedtls_ssl_config_init(&c->conf);
     mbedtls_x509_crt_init(&c->trust);
     mbedtls_x509_crl_init(&c->crl);
-    mbedtls_x509_crt_init(&c->own_cert);
-    mbedtls_pk_init(&c->own_key);
     if (mbedtls_ssl_config_defaults(&c->conf, c->server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
                                     MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
         ktls_config_release(c);
@@ -145,6 +151,23 @@ ktls_config *ktls_config_new(int32_t server)
 
 void ktls_config_retain(ktls_config *c) { atomic_fetch_add_explicit(&c->refs, 1, memory_order_relaxed); }
 
+static ktls_identity *ktls_identity_new(void)
+{
+    ktls_identity *id = calloc(1, sizeof *id);
+    if (id == NULL) return NULL;
+    mbedtls_x509_crt_init(&id->cert);
+    mbedtls_pk_init(&id->key);
+    return id;
+}
+
+static void ktls_identity_free(ktls_identity *id)
+{
+    if (id == NULL) return;
+    mbedtls_x509_crt_free(&id->cert);
+    mbedtls_pk_free(&id->key);
+    free(id);
+}
+
 void ktls_config_release(ktls_config *c)
 {
     if (c == NULL) return;
@@ -152,8 +175,8 @@ void ktls_config_release(ktls_config *c)
     mbedtls_ssl_config_free(&c->conf);
     mbedtls_x509_crt_free(&c->trust);
     mbedtls_x509_crl_free(&c->crl);
-    mbedtls_x509_crt_free(&c->own_cert);
-    mbedtls_pk_free(&c->own_key);
+    for (ktls_identity *id = c->identities; id != NULL;) { ktls_identity *next = id->next; ktls_identity_free(id); id = next; }
+    ktls_identity_free(c->pending);
     for (int32_t i = 0; i < c->alpn_count; i++) free(c->alpn[i]);
     free(c);
 }
@@ -251,11 +274,27 @@ int32_t ktls_config_crl_complete(ktls_config *c, int32_t on)
     return 0;
 }
 
-static int32_t ktls_config_apply_identity(ktls_config *c)
+/* A complete identity joins the configuration. The first is also Mbed TLS's own certificate: the one a handshake
+   serves when the client sent no SNI, or a name no identity covers. */
+static int32_t ktls_config_add_identity(ktls_config *c, ktls_identity *id)
 {
-    int rc = mbedtls_ssl_conf_own_cert(&c->conf, &c->own_cert, &c->own_key);
-    if (rc != 0) return rc;
-    c->own_loaded = 1;
+    if (c->identities == NULL) {
+        int rc = mbedtls_ssl_conf_own_cert(&c->conf, &id->cert, &id->key);
+        if (rc != 0) return rc;
+        c->identities = id;
+        return 0;
+    }
+    ktls_identity *last = c->identities;
+    while (last->next != NULL) last = last->next;
+    last->next = id;
+    return 0;
+}
+
+/* Whether another identity may start: not while a chain waits for its key, and not a second one for a client. */
+static int32_t ktls_config_identity_may_start(const ktls_config *c)
+{
+    if (c->pending != NULL) return KTLS_ERR_INPUT;
+    if (!c->server && c->identities != NULL) return KTLS_ERR_INPUT;
     return 0;
 }
 
@@ -278,73 +317,80 @@ static int ktls_pair_matches(const mbedtls_pk_context *pub, const mbedtls_pk_con
     return len == pub->pub_raw_len && memcmp(raw, pub->pub_raw, len) == 0;
 }
 
-/* The identity is loaded in two steps, so a caller can tell which one failed: the certificate chain (the first
+/* An identity is loaded in two steps, so a caller can tell which one failed: the certificate chain (the first
    certificate is this side's, the rest its chain), then the private key, which must decrypt with the password
-   and pair with the first certificate. Only then is the identity installed. Each step takes PEM or DER. */
+   and pair with the first certificate. Only then does the identity join the configuration; until then a wrong
+   key can be followed by the right one. Each step takes PEM or DER. */
 int32_t ktls_config_certificate_chain(ktls_config *c, const uint8_t *data, size_t len)
 {
     if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
-    if (c->own_loaded || c->own_cert.raw.len > 0) return KTLS_ERR_INPUT;   /* one identity per configuration */
-    int rc;
+    int rc = ktls_config_identity_may_start(c);
+    if (rc != 0) return rc;
+    ktls_identity *id = ktls_identity_new();
+    if (id == NULL) return KTLS_ERR_NOMEM;
     if (ktls_is_pem(data, len)) {
         uint8_t *copy = ktls_terminated(data, len);
-        if (copy == NULL) return KTLS_ERR_NOMEM;
-        rc = mbedtls_x509_crt_parse(&c->own_cert, copy, len + 1);
+        if (copy == NULL) { ktls_identity_free(id); return KTLS_ERR_NOMEM; }
+        rc = mbedtls_x509_crt_parse(&id->cert, copy, len + 1);
         free(copy);
     } else {
-        rc = mbedtls_x509_crt_parse_der(&c->own_cert, data, len);
+        rc = mbedtls_x509_crt_parse_der(&id->cert, data, len);
     }
     if (rc > 0) rc = KTLS_ERR_INPUT;   /* some certificate of a PEM chain did not parse */
-    if (rc == 0 && c->own_cert.raw.len == 0) rc = MBEDTLS_ERR_X509_CERT_UNKNOWN_FORMAT;
-    if (rc != 0) { mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert); }
-    return rc;
+    if (rc == 0 && id->cert.raw.len == 0) rc = MBEDTLS_ERR_X509_CERT_UNKNOWN_FORMAT;
+    if (rc != 0) { ktls_identity_free(id); return rc; }
+    c->pending = id;
+    return 0;
 }
 
 int32_t ktls_config_private_key(ktls_config *c, const uint8_t *data, size_t len, const uint8_t *password, size_t password_len)
 {
     if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
-    if (c->own_loaded || c->own_cert.raw.len == 0) return KTLS_ERR_INPUT;   /* the chain comes first */
+    ktls_identity *id = c->pending;
+    if (id == NULL) return KTLS_ERR_INPUT;   /* the chain comes first */
     const uint8_t *pw = password_len > 0 ? password : NULL;
     int rc;
     if (ktls_is_pem(data, len)) {
         uint8_t *copy = ktls_terminated(data, len);
         if (copy == NULL) return KTLS_ERR_NOMEM;
-        rc = mbedtls_pk_parse_key(&c->own_key, copy, len + 1, pw, password_len);
+        rc = mbedtls_pk_parse_key(&id->key, copy, len + 1, pw, password_len);
         mbedtls_platform_zeroize(copy, len + 1);
         free(copy);
     } else {
-        rc = mbedtls_pk_parse_key(&c->own_key, data, len, pw, password_len);
+        rc = mbedtls_pk_parse_key(&id->key, data, len, pw, password_len);
     }
-    if (rc == 0 && !ktls_pair_matches(&c->own_cert.pk, &c->own_key)) rc = KTLS_ERR_KEY_MISMATCH;
-    if (rc != 0) { mbedtls_pk_free(&c->own_key); mbedtls_pk_init(&c->own_key); return rc; }
-    return ktls_config_apply_identity(c);
+    if (rc == 0 && !ktls_pair_matches(&id->cert.pk, &id->key)) rc = KTLS_ERR_KEY_MISMATCH;
+    if (rc == 0) rc = ktls_config_add_identity(c, id);
+    if (rc != 0) { mbedtls_pk_free(&id->key); mbedtls_pk_init(&id->key); return rc; }
+    c->pending = NULL;
+    return 0;
 }
 
 /* Both steps, from files: an unreadable file is Mbed TLS's FILE_IO error for that step. */
 int32_t ktls_config_identity_files(ktls_config *c, const char *cert, const char *key, const char *password)
 {
     if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
-    if (c->own_loaded || c->own_cert.raw.len > 0) return KTLS_ERR_INPUT;
-    int rc = mbedtls_x509_crt_parse_file(&c->own_cert, cert);
+    int rc = ktls_config_identity_may_start(c);
+    if (rc != 0) return rc;
+    ktls_identity *id = ktls_identity_new();
+    if (id == NULL) return KTLS_ERR_NOMEM;
+    rc = mbedtls_x509_crt_parse_file(&id->cert, cert);
     if (rc > 0) rc = KTLS_ERR_INPUT;
-    if (rc != 0) { mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert); return rc; }
-    rc = mbedtls_pk_parse_keyfile(&c->own_key, key, (password != NULL && password[0] != 0) ? password : NULL);
-    if (rc == 0 && !ktls_pair_matches(&c->own_cert.pk, &c->own_key)) rc = KTLS_ERR_KEY_MISMATCH;
-    if (rc != 0) {
-        mbedtls_pk_free(&c->own_key); mbedtls_pk_init(&c->own_key);
-        mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert);
-        return rc;
-    }
-    return ktls_config_apply_identity(c);
+    if (rc == 0) rc = mbedtls_pk_parse_keyfile(&id->key, key, (password != NULL && password[0] != 0) ? password : NULL);
+    if (rc == 0 && !ktls_pair_matches(&id->cert.pk, &id->key)) rc = KTLS_ERR_KEY_MISMATCH;
+    if (rc == 0) rc = ktls_config_add_identity(c, id);
+    if (rc != 0) ktls_identity_free(id);
+    return rc;
 }
 
+/* Both steps, from bytes. A failure leaves no half-loaded identity behind. */
 int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cert_len,
                                  const uint8_t *key, size_t key_len, const uint8_t *password, size_t password_len)
 {
     int rc = ktls_config_certificate_chain(c, cert, cert_len);
     if (rc != 0) return rc;
     rc = ktls_config_private_key(c, key, key_len, password, password_len);
-    if (rc != 0) { mbedtls_x509_crt_free(&c->own_cert); mbedtls_x509_crt_init(&c->own_cert); }
+    if (rc != 0) { ktls_identity_free(c->pending); c->pending = NULL; }
     return rc;
 }
 
@@ -426,17 +472,82 @@ static int ktls_verify_ip_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32
     return rc;
 }
 
-/* A server records the name a client asked for. Any name is accepted: the session serves its one identity. */
+static int ktls_ascii_equal(const unsigned char *a, const unsigned char *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        unsigned char x = a[i], y = b[i];
+        if (x >= 'A' && x <= 'Z') x = (unsigned char)(x + 32);
+        if (y >= 'A' && y <= 'Z') y = (unsigned char)(y + 32);
+        if (x != y) return 0;
+    }
+    return 1;
+}
+
+/* How well one certificate name covers `host`: 2 exactly, 1 through a "*." wildcard, which stands for exactly one
+   whole left-most label (RFC 6125 §6.4.3), 0 not at all. DNS names compare ASCII case-insensitively. */
+static int ktls_name_covers(const unsigned char *name, size_t name_len, const unsigned char *host, size_t host_len)
+{
+    if (name_len == host_len && ktls_ascii_equal(name, host, host_len)) return 2;
+    if (name_len > 2 && name[0] == '*' && name[1] == '.') {
+        const unsigned char *dot = memchr(host, '.', host_len);
+        if (dot != NULL && dot != host) {
+            size_t rest = host_len - (size_t)(dot - host);
+            if (rest == name_len - 1 && ktls_ascii_equal(name + 1, dot, rest)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* The best any of an identity's names does for `host`: its leaf's subjectAltName dNSNames, or its subject
+   commonNames when it has no dNSName (RFC 6125 §6.4.4). The same names a client checks the certificate against. */
+static int ktls_identity_covers(const ktls_identity *id, const unsigned char *host, size_t host_len)
+{
+    int best = 0, has_dns = 0;
+    for (const mbedtls_x509_sequence *san = &id->cert.subject_alt_names; san != NULL && san->buf.p != NULL; san = san->next) {
+        if ((san->buf.tag & MBEDTLS_ASN1_TAG_VALUE_MASK) != MBEDTLS_X509_SAN_DNS_NAME) continue;
+        has_dns = 1;
+        int m = ktls_name_covers(san->buf.p, san->buf.len, host, host_len);
+        if (m > best) best = m;
+    }
+    if (has_dns) return best;
+    for (const mbedtls_x509_name *n = &id->cert.subject; n != NULL; n = n->next) {
+        if (n->oid.p == NULL || MBEDTLS_OID_CMP(MBEDTLS_OID_AT_CN, &n->oid) != 0) continue;
+        int m = ktls_name_covers(n->val.p, n->val.len, host, host_len);
+        if (m > best) best = m;
+    }
+    return best;
+}
+
+/* A server records the name the client asked for, then chooses what to serve for it: every identity whose
+   certificate covers the name at the best level any does, an exact name beating a wildcard. Mbed TLS then picks
+   among those by the client's signature algorithms, so an RSA and an ECDSA certificate for one name both work.
+   A name no identity covers, like no SNI at all, leaves the default: the first identity. The configuration is
+   frozen while sessions use it, so its identities are read here without a lock. */
 static int ktls_sni_seen(void *ctx, mbedtls_ssl_context *ssl, const unsigned char *name, size_t len)
 {
     (void)ctx;
     ktls_session *s = mbedtls_ssl_get_user_data_p(ssl);
-    if (s == NULL || s->sni != NULL) return 0;
-    s->sni = malloc(len + 1);
-    if (s->sni == NULL) return MBEDTLS_ERR_SSL_ALLOC_FAILED;
-    memcpy(s->sni, name, len);
-    s->sni[len] = 0;
-    return 0;
+    if (s == NULL) return 0;
+    if (s->sni == NULL) {
+        s->sni = malloc(len + 1);
+        if (s->sni == NULL) return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+        memcpy(s->sni, name, len);
+        s->sni[len] = 0;
+    }
+    const ktls_identity *first = s->config->identities;
+    if (first == NULL || first->next == NULL) return 0;   /* one identity: nothing to choose */
+    if (len > 0 && name[len - 1] == '.') len--;          /* a fully qualified name's trailing dot */
+    int best = 0;
+    for (const ktls_identity *id = first; id != NULL; id = id->next) {
+        int m = ktls_identity_covers(id, name, len);
+        if (m > best) best = m;
+    }
+    /* A second ClientHello (after a HelloRetryRequest) chooses again, from an empty list. */
+    int rc = mbedtls_ssl_set_hs_own_cert(ssl, NULL, NULL);
+    for (ktls_identity *id = s->config->identities; rc == 0 && best > 0 && id != NULL; id = id->next) {
+        if (ktls_identity_covers(id, name, len) == best) rc = mbedtls_ssl_set_hs_own_cert(ssl, &id->cert, &id->key);
+    }
+    return rc;
 }
 
 static int ktls_buffer_append(ktls_buffer *b, const uint8_t *src, size_t len)
@@ -491,7 +602,7 @@ static int ktls_bio_recv(void *ctx, unsigned char *buf, size_t len)
 ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t *err)
 {
     *err = 0;
-    if (c->server && !c->own_loaded) { *err = KTLS_ERR_INPUT; return NULL; }
+    if (c->server && c->identities == NULL) { *err = KTLS_ERR_INPUT; return NULL; }
     /* Verifying needs something to verify against; a server that only asks for a certificate (3) does not. */
     if ((c->verify == 1 || c->verify == 2) && !c->trust_loaded) { *err = KTLS_ERR_NOTRUST; return NULL; }
     int has_name = server_name != NULL && server_name[0] != 0;

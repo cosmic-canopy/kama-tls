@@ -6,10 +6,21 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
+Version 0.1.4. Needs **kama ≥ 0.9.523**.
+
+### Added
+- **A server holds several identities and chooses one per handshake by SNI.** Each is loaded as before
+  (`identityFiles`, `identityPem`, or `certificateChain` then `privateKey`), and a handshake serves the identities
+  whose certificate names the host the client asked for: subjectAltName DNS names (the common name when a
+  certificate has none), compared case-insensitively, an exact name before a `*.` wildcard, which covers one whole
+  label. Among equally good ones the client's signature algorithms decide, so an RSA and an ECDSA certificate for
+  one name both work. No SNI, or a name no certificate carries, gets the first identity loaded. A client still holds
+  one identity. Before, a second identity on any configuration was refused.
+
 ## [0.1.3] — 2026-10-18
 
 Needs **kama ≥ 0.9.523**. Verified on kama 0.9.523, 0.9.667 and 0.9.668, debug and release, on macOS arm64 and Linux
-aarch64. Asked for by `@kama/redis`, whose connections carry their errors between isolates and connect by IP address.
+aarch64.
 
 ### Changed
 - **An IP literal given as a client's server name is no longer sent as SNI** (RFC 6066, section 3: "Literal IPv4 and
@@ -49,7 +60,7 @@ Needs **kama ≥ 0.9.523**.
 ## [0.1.0] — 2026-10-02
 
 The first published version. Needs **kama ≥ 0.9.519**; verified on kama 0.9.520 (the latest release), debug and
-release, on macOS arm64 and Linux aarch64, and exercised by `@kama/postgres` against PostgreSQL 14–19. The
+release, on macOS arm64 and Linux aarch64, and exercised end to end against PostgreSQL 14–19. The
 "Fixed" and "Changed" entries below record what changed while that work ran, before anything was published.
 
 ### Fixed

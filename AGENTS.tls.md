@@ -5,9 +5,14 @@ a publishable library needs. Both are written by `kama agents install` and are *
 is the project-specific third, and it is the one to edit.
 
 **Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.523**, declared as `"kama"`
-in every manifest here. Its first consumer is `@kama/postgres` (`../kama-postgres`), which exercised the whole API
-before 0.1.0 was published. A registry version is permanent: a change ships as a new version, and only on the
+in every manifest here. A registry version is permanent: a change ships as a new version, and only on the
 maintainer's word.
+
+- **Name no project this package does not depend on.** Code, comments, docs, the CHANGELOG and commit messages
+  name its dependencies (kama and its std, Mbed TLS) and the standards and reference implementations a behavior
+  is defined against (an RFC, OpenSSL, libpq's rules), never a package or program that uses this one, sibling
+  `@kama/*` packages included. A request from a user becomes a general feature of this package, justified by the
+  protocol or a general need rather than by who asked. Pushed commits and published versions stay as they are.
 
 - **What the registry shows comes from `kama.json`:** `description`, `repository` and `keywords`, which `kama
   pkg search` and registry.kama-lang.org read. `kama publish` copies them into the version's index entry, and an
@@ -32,6 +37,7 @@ maintainer's word.
   - the memory-BIO session (phase 2);
   - error text into a caller buffer;
   - the RFC 5929 end-point hash and the RFC 9266 tls-exporter value;
+  - the SNI callback that chooses among a server's identities (`ktls_sni_seen`);
   - a `_Static_assert` per size kama spells as a literal.
 
   Entropy is Mbed TLS's builtin source (getrandom / getentropy / BCryptGenRandom).
@@ -53,6 +59,11 @@ maintainer's word.
   per-session verify callback (`mbedtls_ssl_set_verify`, which takes precedence over the configuration's)
   compares the address with the leaf's IP SANs under `Verify::Full` (`ktls_verify_ip_cb`). Only an IP SAN
   names an address, as in OpenSSL's `X509_check_ip` and Go.
+- **A server's identities are chosen per handshake, in Mbed TLS's SNI callback.** `ktls_sni_seen` hands
+  `mbedtls_ssl_set_hs_own_cert` every identity whose certificate covers the SNI name best, and Mbed TLS picks among
+  them by the client's signature algorithms. The first identity is also the configuration's own certificate
+  (`mbedtls_ssl_conf_own_cert`), which a handshake without SNI, or with a name none covers, falls back to. A
+  configuration is frozen while sessions use it, so the callback reads the list without a lock.
 - **An engine failure in a read, write or flush is an `Other` IoError, and the stream keeps its code.** std's
   `IoError` is a kind plus an OS code, and only std can attach a code, so the engine's cannot ride in it.
   `TlsStream.tlsError()` rebuilds the `TlsError` from the kept code: `Certificate` or `Handshake` before the
@@ -65,5 +76,5 @@ maintainer's word.
 - **Test certificates are generated** into `out/test-certs` by `tools/gen-certs.sh` and never tracked.
   `kama publish` refuses a tracked `*.key` or `*.pem`, and so does the registry.
 - **A gap goes in a `KAMA_GAPS.md` here the moment it is hit**, reduced to a repro and run on the named
-  compiler. Postgres keeps its own file. When this one first appears, add it to `publish.exclude`, because
-  an exclude entry that matches no tracked file is an error.
+  compiler. When this one first appears, add it to `publish.exclude`, because an exclude entry that matches no
+  tracked file is an error.

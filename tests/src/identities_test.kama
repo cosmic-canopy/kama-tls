@@ -1,0 +1,100 @@
+// A server holding several identities serves each handshake the ones whose certificate names the host the client
+// asked for by SNI: an exact name before a "*." wildcard (which stands for one whole label), the common name when a
+// certificate has no SAN, and the first identity loaded when the client sent no SNI or a name none covers. Each case
+// compares the certificate the client was served with the file's own DER.
+import { std::io::IoError, std::collections::DynamicArray, std::fs::readFile,
+         tls::TlsConfig, tls::TlsError, tls::Verify, tls::TlsVersion,
+         tls_tests::check, tls_tests::certPath, tls_tests::clientConfig, tls_tests::connect, tls_tests::drive,
+         tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome, tls_tests::pemBody,
+         tls_tests::sameBytes };
+export { identitiesTests };
+
+fn int32 codeOf(Result<Unit, TlsError> r) {
+    return match (give r) { case Ok(value: u): 0; case Err(error: e): match (e) { case Config(code: k, detail: d): k; case _: -1000; }; };
+}
+
+// `name`.crt and `name`.key as one more identity: 0, or the configuration's error code.
+fn int32 add(ref TlsConfig c, const ref string name) {
+    string crt = certPath(name: name.concat(other: ".crt"));
+    string key = certPath(name: name.concat(other: ".key"));
+    string nopw = "";
+    return codeOf(r: c.identityFiles(certificate: crt, key: key, password: nopw));
+}
+
+fn DynamicArray<uint8> bytesOf(const ref string name) {
+    Result<DynamicArray<uint8>, IoError> read = readFile(path: certPath(name: name));
+    return match (give read) { case Ok(value: b): give b; case Err(error: e): { panic(msg: "read fixture"); return DynamicArray.empty(); } };
+}
+
+// A client verifying with `mode` asks `server` for `name`: the handshake completes, and the certificate served is
+// `want`.crt.
+fn int32 serves(const ref TlsConfig server, Verify mode, bool tls12, const ref string name, const ref string want,
+                const ref string what) {
+    string ca = "ca.crt";
+    Result<TlsConfig, TlsError> made = clientConfig(mode: mode, caName: ca);
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": client config")); } };
+    if (tls12) { Result<Unit, TlsError> pin = c.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12); }
+    Result<Session, TlsError> s = connect(client: c, server: server, name: name);
+    Session pair = match (give s) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": session")); } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    if (!completed(o: o)) { return check(ok: false, what: what.concat(other: ": the handshake (").concat(other: describe(o: o)).concat(other: ")")); }
+    DynamicArray<uint8> got = pair.c().peerCertificate();
+    DynamicArray<uint8> expected = pemBody(path: certPath(name: want.concat(other: ".crt")));
+    return check(ok: got.length() > 0 && sameBytes(a: got.view(), b: expected.view()), what: what.concat(other: ": serves ").concat(other: want).concat(other: ".crt"));
+}
+
+fn int32 choiceTests() {
+    int32 f = 0;
+    Result<TlsConfig, TlsError> made = TlsConfig.server();
+    TlsConfig s = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "identities: server config"); } };
+    // server.crt (localhost, RSA) first, so it is the default. server-ec names localhost too, with an ECDSA key.
+    f = f + check(ok: add(c: s, name: "server") == 0, what: "identities: the first identity loads");
+    bool more = add(c: s, name: "sni-other") == 0 && add(c: s, name: "sni-wild") == 0 && add(c: s, name: "sni-exact") == 0
+                && add(c: s, name: "sni-cn") == 0 && add(c: s, name: "server-ec") == 0;
+    f = f + check(ok: more, what: "identities: a server takes more identities");
+
+    f = f + serves(server: s, mode: Verify::Full, tls12: false, name: "other.test", want: "sni-other", what: "identities: a second name");
+    f = f + serves(server: s, mode: Verify::Full, tls12: true, name: "other.test", want: "sni-other", what: "identities: a second name under TLS 1.2");
+    f = f + serves(server: s, mode: Verify::Full, tls12: false, name: "b.wild.test", want: "sni-wild", what: "identities: a wildcard covers one label");
+    f = f + serves(server: s, mode: Verify::Full, tls12: false, name: "a.wild.test", want: "sni-exact", what: "identities: an exact name beats a wildcard loaded before it");
+    f = f + serves(server: s, mode: Verify::Full, tls12: false, name: "cn-only.test", want: "sni-cn", what: "identities: a certificate with no SAN is chosen by its common name");
+    f = f + serves(server: s, mode: Verify::Full, tls12: false, name: "OTHER.Test", want: "sni-other", what: "identities: names compare case-insensitively");
+    // Two identities name localhost equally well, so both are offered, and the handshake picks by the client's
+    // signature algorithms: Mbed TLS's client lists ECDSA first.
+    f = f + serves(server: s, mode: Verify::Full, tls12: false, name: "localhost", want: "server-ec", what: "identities: an equal tie goes to the client's preferred key type");
+    // The rest are names no identity covers, which a chain-only client accepts: the first identity answers.
+    f = f + serves(server: s, mode: Verify::Chain, tls12: false, name: "other.test.", want: "sni-other", what: "identities: a trailing dot is ignored");
+    f = f + serves(server: s, mode: Verify::Chain, tls12: false, name: "x.b.wild.test", want: "server", what: "identities: a wildcard does not cover two labels");
+    f = f + serves(server: s, mode: Verify::Chain, tls12: false, name: "unknown.test", want: "server", what: "identities: an unknown name gets the first identity");
+    f = f + serves(server: s, mode: Verify::Chain, tls12: false, name: "", want: "server", what: "identities: no SNI gets the first identity");
+    f = f + check(ok: add(c: s, name: "wronghost") == -4, what: "identities: none can be added once a session uses the configuration");
+    return f;
+}
+
+// The order identities load in: a chain waiting for its key blocks another, and a client holds one.
+fn int32 loadingTests() {
+    int32 f = 0;
+    string nopw = "";
+    Result<TlsConfig, TlsError> made = TlsConfig.server();
+    TlsConfig s = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "identities: server config"); } };
+    DynamicArray<uint8> crt = bytesOf(name: "sni-other.crt");
+    DynamicArray<uint8> key = bytesOf(name: "sni-other.key");
+    f = f + check(ok: codeOf(r: s.certificateChain(bytes: crt.view())) == 0, what: "identities: a chain waits for its key");
+    f = f + check(ok: add(c: s, name: "server") == -5, what: "identities: no other identity starts while it waits");
+    f = f + check(ok: codeOf(r: s.privateKey(bytes: key.view(), password: nopw.bytes())) == 0, what: "identities: its key completes it");
+    f = f + check(ok: add(c: s, name: "server") == 0, what: "identities: then another starts");
+
+    string ca = "ca.crt";
+    Result<TlsConfig, TlsError> cm = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig c = match (give cm) { case Ok(value: x): give x; case Err(error: e): { return f + check(ok: false, what: "identities: client config"); } };
+    f = f + check(ok: add(c: c, name: "client") == 0, what: "identities: a client takes one");
+    f = f + check(ok: add(c: c, name: "client") == -5, what: "identities: a client refuses a second");
+    return f;
+}
+
+fn int32 identitiesTests() {
+    int32 f = 0;
+    f = f + choiceTests();
+    f = f + loadingTests();
+    return f;
+}

@@ -86,7 +86,12 @@ type resource TlsConfig implements Sendable {
     public unsafe ctor Result<TlsConfig, TlsError> client() { return TlsConfig.make(server: 0); }
 
     // A server: needs an identity (`identityFiles` / `identityPem`) before it can accept, and asks for no
-    // client certificate until `verify(mode: Verify::Chain)`.
+    // client certificate until `verify(mode: Verify::Chain)`. It may hold several identities, one per call: each
+    // handshake serves the ones whose certificate names the host the client asked for by SNI (subjectAltName DNS
+    // names, else the common name), an exact name before a "*." wildcard, which stands for one whole left-most
+    // label. With no SNI, or a name no identity's certificate carries, it serves the first identity loaded. When
+    // several identities name the host equally well (an RSA and an ECDSA certificate for it), the handshake picks
+    // among them by the signature algorithms the client accepts.
     public unsafe ctor Result<TlsConfig, TlsError> server() { return TlsConfig.make(server: 1); }
 
     unsafe ctor Result<TlsConfig, TlsError> make(int32 server) {
@@ -162,7 +167,8 @@ type resource TlsConfig implements Sendable {
     }
 
     // This side's certificate chain, PEM or DER: the first certificate is this side's, the rest its chain. The
-    // first step of an identity, so a failure here is the certificate's; `privateKey` is the second.
+    // first step of an identity, so a failure here is the certificate's; `privateKey` is the second. A client holds
+    // one identity; a server may add more (see `server()`), but not while a chain is still waiting for its key.
     public unsafe fn Result<Unit, TlsError> certificateChain(ConstView<uint8> bytes) {
         return checked(rc: ktls_config_certificate_chain(c: this.handle, data: bytes.dataPtr(), len: cast<usize>(bytes.length())));
     }

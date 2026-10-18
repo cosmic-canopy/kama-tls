@@ -1,4 +1,4 @@
-# CI for @kama/tls. Copied in shape from @kama/sodium's workflow.
+# CI for @kama/tls.
 #
 # The whole gate is tools/test.sh: every case is hermetic (in-memory pipes and loopback TCP), built debug
 # AND release. Mbed TLS is vendored and compiled through `csources`, so nothing is installed on the runner
