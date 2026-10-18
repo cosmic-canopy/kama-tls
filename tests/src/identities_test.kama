@@ -6,12 +6,8 @@ import { std::io::IoError, std::collections::DynamicArray, std::fs::readFile,
          tls::TlsConfig, tls::TlsError, tls::Verify, tls::TlsVersion,
          tls_tests::check, tls_tests::certPath, tls_tests::clientConfig, tls_tests::connect, tls_tests::drive,
          tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome, tls_tests::pemBody,
-         tls_tests::sameBytes };
+         tls_tests::sameBytes, tls_tests::codeOf };
 export { identitiesTests };
-
-fn int32 codeOf(Result<Unit, TlsError> r) {
-    return match (give r) { case Ok(value: u): 0; case Err(error: e): match (e) { case Config(code: k, detail: d): k; case _: -1000; }; };
-}
 
 // `name`.crt and `name`.key as one more identity: 0, or the configuration's error code.
 fn int32 add(ref TlsConfig c, const ref string name) {

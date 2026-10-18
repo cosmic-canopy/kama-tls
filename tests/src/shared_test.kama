@@ -1,0 +1,132 @@
+// One configuration in two isolates' hands at once. `share()` gives a second isolate a handle, and it calls every
+// kind of setter in a loop while this isolate makes sessions from the same configuration, calling a setter and the
+// one reader (`trustCount()`) between them. Every setter answers Ok until a session freezes the configuration and
+// -4 from then on, never Ok again, and every handshake completes. A plain run cannot see a data race, so
+// tools/tsan.sh runs this under ThreadSanitizer. Loading a key takes Mbed TLS's own locks in both isolates, which
+// orders everything before it as far as ThreadSanitizer can tell, so the setters load identities only in their
+// first rounds, and the first session waits until the setter isolate is past them.
+import { std::concurrent::Channel, std::concurrent::Sender, std::concurrent::Receiver, std::time::sleep,
+         std::time::Duration, std::time::Instant, std::time::monotonicNow,
+         tls::TlsConfig, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Revocation,
+         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::drive, tls_tests::completed, tls_tests::Session, tls_tests::Outcome, tls_tests::codeOf };
+export { sharedTests };
+
+// What the setter isolate sends before its verdict, so the sessions start only once it is running.
+comptime int32 STARTED = 100;
+// The setter rounds run on for this many after the first -4, while sessions are still being made.
+comptime int32 AFTER_FREEZE = 50;
+// The rounds that load an identity and an ALPN name (a ninth name is refused).
+comptime int32 LOADING_ROUNDS = 8;
+// How long this isolate waits before its first session, for the setter isolate to finish its loading rounds.
+comptime int64 HEAD_START_MS = 50i64;
+// A configuration still unfrozen after this long fails the test rather than hanging it.
+comptime int64 GIVE_UP_SECS = 30i64;
+comptime int32 SESSIONS = 8;
+
+// 0 for Ok before the freeze or -4 (which marks it), `step` for any other answer, 10 + `step` for Ok after a -4.
+fn int32 judge(Result<Unit, TlsError> r, int32 step, ref bool frozen) {
+    int32 code = codeOf(r: give r);
+    if (code == -4) { frozen = true; return 0; }
+    if (code != 0) { return step; }
+    if (frozen) { return 10 + step; }
+    return 0;
+}
+
+// What the setter isolate needs, moved in whole: its handle on the configuration and a way to report.
+type resource SetterJob implements Sendable {
+    TlsConfig config;
+    Sender<int32> report;
+    public ctor make(TlsConfig config, Sender<int32> report) { this.config = give config; this.report = give report; }
+    public fn void run() {
+        this.report.send(item: STARTED);
+        int32 v = this.rounds();
+        this.report.send(item: v);
+    }
+    // Every setter once a round: the versions, the verify mode, the CRL rule, the trust chain and the CRLs, and in
+    // the loading rounds an identity and an ALPN name. None of them changes what a handshake does: the server
+    // verifies no client, and every identity names localhost. 0, what `judge` said, or 20 when no session froze
+    // the configuration.
+    fn int32 rounds() {
+        string ca = certPath(name: "ca.crt");
+        string crl = certPath(name: "empty.crl");
+        string crt = certPath(name: "server.crt");
+        string key = certPath(name: "server.key");
+        string nopw = "";
+        string proto = "x";
+        bool frozen = false;
+        int32 n = 0;
+        int32 after = 0;
+        Instant start = monotonicNow();
+        while (after < AFTER_FREEZE) {
+            if (!frozen && start.elapsed().asSecs() >= GIVE_UP_SECS) { return 20; }
+            bool loading = n < LOADING_ROUNDS;
+            int32 bad = 0;
+            if (loading) { bad = judge(r: this.config.identityFiles(certificate: crt, key: key, password: nopw), step: 1, frozen: frozen); }
+            if (bad == 0 && loading) { bad = judge(r: this.config.alpn(protocol: proto), step: 2, frozen: frozen); }
+            if (bad == 0) { bad = judge(r: this.config.trustFile(path: ca), step: 3, frozen: frozen); }
+            if (bad == 0) { bad = judge(r: this.config.revocationFile(path: crl), step: 4, frozen: frozen); }
+            if (bad == 0) { bad = judge(r: this.config.revocation(mode: Revocation::Listed), step: 5, frozen: frozen); }
+            if (bad == 0) { bad = judge(r: this.config.verify(mode: Verify::None), step: 6, frozen: frozen); }
+            if (bad == 0) { bad = judge(r: this.config.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls13), step: 7, frozen: frozen); }
+            if (bad != 0) { return bad; }
+            if (frozen) { after = after + 1; }
+            n = n + 1;
+        }
+        return 0;
+    }
+}
+
+fn void setters(SetterJob job) { job.run(); }
+
+// A client verifying `server` by name completes its handshake.
+fn bool handshakes(const ref TlsConfig client, const ref TlsConfig server) {
+    string localhost = "localhost";
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return false; } };
+    Outcome o = drive(c: pair.c(), s: pair.s());
+    return completed(o: o);
+}
+
+fn int32 sharedTests() {
+    int32 f = 0;
+    string crt = "server.crt"; string key = "server.key"; string ca = "ca.crt";
+    Result<TlsConfig, TlsError> sc = serverConfig(certName: crt, keyName: key);
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "shared: server config"); } };
+    Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "shared: client config"); } };
+
+    Channel<int32> reports = Channel.bounded(capacity: 2);
+    Receiver<int32> heard = reports.receiver();
+    SetterJob job = SetterJob.make(config: server.share(), report: reports.sender());
+    int32 done = 0;
+    int32 refused = 0;     // answers to this isolate's setter that were neither Ok nor -4
+    int32 thawed = 0;      // an Ok after a -4
+    int32 drifted = 0;     // a trust count that changed once sessions existed
+    bool frozen = false;
+    isize trusted = 0;
+    scope {
+        spawn setters(job: give job);
+        Optional<int32> first = heard.recv();
+        int32 marker = match (first) { case Some(value: x): x; case None: -1; };
+        f = f + check(ok: marker == STARTED, what: "shared: the setter isolate starts");
+        sleep(d: Duration.fromMillis(ms: HEAD_START_MS));
+        int32 i = 0;
+        while (i < SESSIONS) {
+            int32 v = codeOf(r: server.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls13));
+            if (v == -4) { frozen = true; } else if (v != 0) { refused = refused + 1; } else if (frozen) { thawed = thawed + 1; }
+            isize n = server.trustCount();
+            if (i == 1) { trusted = n; }
+            if (i > 1 && n != trusted) { drifted = drifted + 1; }
+            if (handshakes(client: client, server: server)) { done = done + 1; }
+            i = i + 1;
+        }
+    }
+    Optional<int32> last = heard.recv();
+    int32 verdict = match (last) { case Some(value: x): x; case None: -1; };
+    f = f + check(ok: done == SESSIONS, what: "shared: every handshake completes while the other isolate calls setters (${done} of 8)");
+    f = f + check(ok: refused == 0 && thawed == 0 && frozen, what: "shared: this isolate's setter answers Ok, then -4 once a session exists");
+    f = f + check(ok: drifted == 0, what: "shared: the trust count holds still once the configuration is frozen");
+    f = f + check(ok: verdict == 0, what: "shared: every setter in the other isolate answers Ok, then -4 once a session exists (step ${verdict})");
+    return f;
+}

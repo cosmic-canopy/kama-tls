@@ -6,6 +6,17 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
+Version 0.1.5. Needs **kama ≥ 0.9.523**.
+
+### Fixed
+- **A configuration's setters no longer race each other or a session being made from it.** `share()` gives another
+  isolate a handle on the same configuration, and nothing stopped a setter on one isolate from changing it while a
+  setter on another changed the same fields, or while a session read it. That is a data race in the C, undefined
+  behavior. Now every setter, `trustCount()` and the making of a session hold the configuration's lock, so each one
+  takes effect whole, and a setter that comes after the first session answers `TlsError::Config` with code -4, as
+  before. A program that finished configuring before it shared, the documented pattern, was never affected. The API
+  is unchanged.
+
 ## [0.1.4] — 2026-10-18
 
 Needs **kama ≥ 0.9.523**.

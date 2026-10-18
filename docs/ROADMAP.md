@@ -8,13 +8,13 @@ client certificate, a step-wise identity with a pair check, and key logging.
 
 Published on the official registry: 0.1.0 (2026-10-02); 0.1.1 (2026-10-03), what the registry shows and searches, so
 it needs kama 0.9.523; 0.1.2 (2026-10-13), the RFC 9266 tls-exporter channel binding (phase 4); 0.1.3 (2026-10-18),
-no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Sendable`. 0.1.4, unpublished, lets a
-server hold several identities and choose one per handshake by SNI (phase 5).
+no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Sendable`; 0.1.4 (2026-10-18), a server
+holds several identities and chooses one per handshake by SNI (phase 5). 0.1.5, unpublished, fixes a race on shared
+configurations (phase 6).
 
-**Next: phase 6, a race on shared configurations** ([Shared configurations](#shared-configurations)): a small fix
-with its design written, to ship as 0.1.5. Then every platform kama builds for ([Platforms](#platforms)), then
-session resumption on TLS 1.3 and 1.2 ([Session resumption](#session-resumption)). The maintainer settled the scope
-questions on 2026-10-18; the decisions are recorded in each section.
+**Next: every platform kama builds for** ([Platforms](#platforms)), Windows first (phase 7), then session resumption
+on TLS 1.3 and 1.2 ([Session resumption](#session-resumption)). The maintainer settled the scope questions on
+2026-10-18; the decisions are recorded in each section.
 
 | # | phase | state |
 |---|---|---|
@@ -24,9 +24,9 @@ questions on 2026-10-18; the decisions are recorded in each section.
 | 3 | Exercised end to end against PostgreSQL 14–19 (the sslmode matrix, SCRAM-SHA-256-PLUS, client certificates) | **done** |
 | — | Publish 0.1.0 | **done** (2026-10-02) |
 | 4 | RFC 9266 tls-exporter channel binding as `TlsStream.tlsExporter()`, TLS 1.3 only ([issue #1](https://github.com/cosmic-canopy/kama-tls/issues/1)); see [Channel bindings](#channel-bindings) | **done** (0.1.2, 2026-10-13) |
-| 5 | A server holds several identities and serves each handshake the ones whose certificate names the SNI host; see [Server identities](#server-identities) | **done** (0.1.4, unpublished) |
-| 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **next** (0.1.5) |
-| 7 | Windows; see [Platforms](#platforms) | planned |
+| 5 | A server holds several identities and serves each handshake the ones whose certificate names the SNI host; see [Server identities](#server-identities) | **done** (0.1.4, 2026-10-18) |
+| 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **done** (0.1.5, unpublished) |
+| 7 | Windows; see [Platforms](#platforms) | **next** |
 | 8 | WebAssembly (`--target WASM`), the wasm leg `AGENTS.package.md` asks of a package that vendors C; see [Platforms](#platforms) | planned |
 | 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | planned |
 | 10 | Session resumption on TLS 1.2; see [Session resumption](#session-resumption) | planned |
@@ -96,26 +96,28 @@ Phase 5, 0.1.4. A server can answer several host names from one listener, each w
 
 ## Shared configurations
 
-Phase 6, **next**, as 0.1.5. A data race found while building phase 5. It has not been seen to fail, and no test
-shows it yet.
+Phase 6, **done** (0.1.5, unpublished). A data race found while building phase 5. No run had been seen to fail.
 
 **The race.** `TlsConfig` is `Sendable`, and `share()` hands out another handle on the same C configuration.
-- Every setter checks `frozen` and then changes the configuration, as two steps.
-- `ktls_session_new` sets `frozen` and then reads the configuration (`mbedtls_ssl_setup`).
+- Every setter checked `frozen` and then changed the configuration, as two steps.
+- `ktls_session_new` set `frozen` and then read the configuration (`mbedtls_ssl_setup`).
 
 So with two handles on two isolates:
-- two setters can change the configuration at once: the ALPN array, the trust chain, the CRLs, the identity list;
-- a setter that passed its check can still be changing the configuration while a session is set up from it.
+- two setters could change the configuration at once: the ALPN array, the trust chain, the CRLs, the identity list;
+- a setter that had passed its check could still be changing the configuration while a session was set up from it.
 
 Either one is a C data race, which is undefined behavior, not just a wrong answer. A program that finishes
-configuring before it shares, the pattern the API documents, never hits it.
+configuring before it shares, the pattern the API documents, never hit it.
 
 **The fix.**
-- Add a mutex to `ktls_config`, using Mbed TLS's `mbedtls_mutex_*`, so it follows `MBEDTLS_THREADING_*` to Windows
-  later.
-- Every setter takes the mutex around its check and its change. So does `ktls_config_trust_count`, the one reader.
-- `ktls_session_new` takes it around its precondition checks and the store to `frozen`, then sets the session up
-  after releasing it. A frozen configuration cannot change.
+- `ktls_config` has a mutex, Mbed TLS's `mbedtls_mutex_*`, so it follows `MBEDTLS_THREADING_*` to Windows in phase
+  7. It sits under `#if defined(MBEDTLS_THREADING_C)`, as in Mbed TLS's own `ssl_cache.c`: a build without
+  threading has one thread.
+- Every setter takes it around its check and its change: `ktls_change_begin` and `ktls_change_end` around a
+  `…_locked` body. So does `ktls_config_trust_count`, the one reader. `identityPem` holds it once across both of its
+  steps.
+- `ktls_session_new` takes it around its precondition checks and the store to `frozen`, now a plain field under the
+  lock. It sets the session up after releasing it. A frozen configuration cannot change.
 - The SNI and verify callbacks keep reading without a lock, because they run only after the freeze.
 - The API doesn't change, so this is a patch release, 0.1.5.
 
@@ -123,12 +125,30 @@ configuring before it shares, the pattern the API documents, never hits it.
 and then sets something on it, on one isolate, would get `-4` where it gets Ok today. That breaks callers, so it
 would have to be 0.2.0.
 
-**The test.**
-- Two isolates, each with a handle on one configuration: one calls setters in a loop while the other makes
-  sessions. Both must finish, and every setter must answer Ok or `-4`.
-- A plain run cannot prove a race is gone. So run the tests under ThreadSanitizer once before the fix and once
-  after (`-fsanitize=thread` in a `select` entry's `cflags` and `ldflags` on `tests/kama.json`; in the Linux
-  container if this host's toolchain will not run it). Before the fix it should report the race; after, nothing.
+**The test.** `tests/src/shared_test.kama`.
+- Two isolates each hold a handle on one server configuration.
+  - One calls every kind of setter in a loop: an identity and an ALPN name in its first eight rounds, then the trust
+    chain, the CRLs, the CRL rule, the verify mode and the versions in every round.
+  - The other waits 50 ms, then makes eight sessions. Before each, it calls `versions(…)` and `trustCount()`.
+- What must hold:
+  - every handshake completes;
+  - every setter answers Ok until the first session and `-4` after it, never Ok again;
+  - the trust count holds still once the configuration is frozen.
+- Why that shape. Loading a key takes Mbed TLS's PSA locks on both isolates, and ThreadSanitizer counts a lock as
+  ordering everything before it. With an identity in every round and no head start, five runs before the fix each
+  reported only one race: the two `versions(…)` calls meeting.
+
+**ThreadSanitizer.** `tools/tsan.sh` builds the tests with `-fsanitize=thread` in a `select` entry and runs them.
+- kama 0.9.523 refuses build flags in a `select` value; they arrived in 0.9.610. So the entry is not in
+  `tests/kama.json`, whose floor is the package's. It is in a manifest the script writes into a temporary directory,
+  beside a copy of `tests/src`.
+- It ran on macOS arm64 with kama 0.9.671 and Apple clang 21.
+- Before the fix, every one of six runs reported races. Among them:
+  - `ktls_config_versions` on both isolates at once (two setters);
+  - `ktls_config_trust_count` against `ktls_config_trust_file`, and against the CA chain growing in `x509_crt.c`
+    (the reader);
+  - `ktls_session_new` reading `verify` against `ktls_config_verify` (a session being made).
+- After the fix: no report in seven runs, and every test passes.
 
 ## Session resumption
 

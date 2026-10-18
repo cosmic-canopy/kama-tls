@@ -64,6 +64,18 @@ maintainer's word.
   them by the client's signature algorithms. The first identity is also the configuration's own certificate
   (`mbedtls_ssl_conf_own_cert`), which a handshake without SNI, or with a name none covers, falls back to. A
   configuration is frozen while sessions use it, so the callback reads the list without a lock.
+- **A configuration's setters hold its lock.** `share()` puts one configuration in several isolates' hands. So these
+  hold `ktls_config.lock`, an `mbedtls_mutex_*`:
+  - every setter, through `ktls_change_begin` / `ktls_change_end`, which a new setter goes through too;
+  - `ktls_config_trust_count`;
+  - `ktls_session_new`, for its checks and the freeze.
+
+  A frozen configuration never changes, so a session and its callbacks read it without the lock.
+- **`tools/tsan.sh` runs the tests under ThreadSanitizer.** Run it after a change to anything isolates share. It
+  needs kama ≥ 0.9.610, for build flags in a `select` value, so it writes its own manifest and is not part of the
+  gate.
+  - Loading a key takes Mbed TLS's PSA locks, which ThreadSanitizer counts as ordering both isolates. A test meant to
+    catch a race keeps key loads out of the stretch where the two isolates overlap.
 - **An engine failure in a read, write or flush is an `Other` IoError, and the stream keeps its code.** std's
   `IoError` is a kind plus an OS code, and only std can attach a code, so the engine's cannot ride in it.
   `TlsStream.tlsError()` rebuilds the `TlsError` from the kept code: `Certificate` or `Handshake` before the

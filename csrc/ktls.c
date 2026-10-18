@@ -22,6 +22,7 @@
 #include <mbedtls/platform_util.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/ssl_ciphersuites.h>
+#include <mbedtls/threading.h>
 #include <mbedtls/version.h>
 #include <mbedtls/x509_crl.h>
 #include <mbedtls/x509_crt.h>
@@ -74,7 +75,10 @@ typedef struct ktls_identity {
 
 struct ktls_config {
     atomic_int refs;
-    atomic_int frozen;            /* set when the first session is made from it */
+#if defined(MBEDTLS_THREADING_C)
+    mbedtls_threading_mutex_t lock;   /* held by every setter and by a session's freeze (ktls_lock) */
+#endif
+    int32_t frozen;               /* set, under the lock, when the first session is made from it */
     int32_t server;
     int32_t verify;               /* 0 none, 1 chain only, 2 chain and name; a server's 3 asks without requiring */
     mbedtls_ssl_config conf;
@@ -132,8 +136,10 @@ ktls_config *ktls_config_new(int32_t server)
     if (ktls_init() != 0) return NULL;
     ktls_config *c = calloc(1, sizeof *c);
     if (c == NULL) return NULL;
+#if defined(MBEDTLS_THREADING_C)
+    mbedtls_mutex_init(&c->lock);
+#endif
     atomic_init(&c->refs, 1);
-    atomic_init(&c->frozen, 0);
     c->server = server ? 1 : 0;
     c->verify = server ? 0 : 2;   /* a client verifies chain and name unless told otherwise */
     mbedtls_ssl_config_init(&c->conf);
@@ -178,18 +184,66 @@ void ktls_config_release(ktls_config *c)
     for (ktls_identity *id = c->identities; id != NULL;) { ktls_identity *next = id->next; ktls_identity_free(id); id = next; }
     ktls_identity_free(c->pending);
     for (int32_t i = 0; i < c->alpn_count; i++) free(c->alpn[i]);
+#if defined(MBEDTLS_THREADING_C)
+    mbedtls_mutex_free(&c->lock);
+#endif
     free(c);
 }
 
-static int ktls_mutable(const ktls_config *c) { return !atomic_load_explicit(&c->frozen, memory_order_acquire); }
-
-int32_t ktls_config_verify(ktls_config *c, int32_t mode)
+/* share() puts one configuration in several isolates' hands, so a setter on one can run while a setter on another
+   changes the same fields, or while a session is being made from it. So every setter holds the configuration's lock
+   around its frozen check and its change, ktls_config_trust_count holds it to read, and ktls_session_new holds it
+   around its checks and the freeze. A frozen configuration never changes again, so a session reads it, and its
+   callbacks read it, without the lock. The lock is one of Mbed TLS's mutexes, so it follows MBEDTLS_THREADING_* to
+   whatever platform the package is built for; a build without threading has a single thread and needs none.
+   A setter's body runs between ktls_change_begin and ktls_change_end. Most are a …_locked function the public one
+   wraps, so their early returns stay as they were. */
+static int32_t ktls_lock(ktls_config *c)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+#if defined(MBEDTLS_THREADING_C)
+    return mbedtls_mutex_lock(&c->lock);
+#else
+    (void)c;
+    return 0;
+#endif
+}
+
+static void ktls_unlock(ktls_config *c)
+{
+#if defined(MBEDTLS_THREADING_C)
+    mbedtls_mutex_unlock(&c->lock);
+#else
+    (void)c;
+#endif
+}
+
+/* 0 holding the lock, with the configuration still open to change; otherwise not holding it, and the reason. */
+static int32_t ktls_change_begin(ktls_config *c)
+{
+    int32_t rc = ktls_lock(c);
+    if (rc != 0) return rc;
+    if (c->frozen) { ktls_unlock(c); return KTLS_ERR_FROZEN; }
+    return 0;
+}
+
+static int32_t ktls_change_end(ktls_config *c, int32_t rc)
+{
+    ktls_unlock(c);
+    return rc;
+}
+
+static int32_t ktls_config_verify_locked(ktls_config *c, int32_t mode)
+{
     if (mode < 0 || mode > 3 || (mode == 3 && !c->server)) return KTLS_ERR_INPUT;
     c->verify = mode;
     ktls_config_apply_verify(c);
     return 0;
+}
+
+int32_t ktls_config_verify(ktls_config *c, int32_t mode)
+{
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_verify_locked(c, mode));
 }
 
 static void ktls_config_apply_trust(ktls_config *c)
@@ -197,14 +251,19 @@ static void ktls_config_apply_trust(ktls_config *c)
     mbedtls_ssl_conf_ca_chain(&c->conf, c->trust_loaded ? &c->trust : NULL, c->crl_loaded ? &c->crl : NULL);
 }
 
-int32_t ktls_config_trust_file(ktls_config *c, const char *path)
+static int32_t ktls_config_trust_file_locked(ktls_config *c, const char *path)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
     int rc = mbedtls_x509_crt_parse_file(&c->trust, path);
     if (rc < 0) return rc;
     c->trust_loaded = 1;
     ktls_config_apply_trust(c);
     return rc;   /* > 0: that many certificates in the file could not be parsed and were skipped */
+}
+
+int32_t ktls_config_trust_file(ktls_config *c, const char *path)
+{
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_trust_file_locked(c, path));
 }
 
 /* Whether bytes are PEM text (they hold a "-----BEGIN" line) rather than DER. */
@@ -225,9 +284,8 @@ static uint8_t *ktls_terminated(const uint8_t *buf, size_t len)
     return copy;
 }
 
-int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len)
+static int32_t ktls_config_trust_pem_locked(ktls_config *c, const uint8_t *pem, size_t len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
     uint8_t *copy = ktls_terminated(pem, len);
     if (copy == NULL) return KTLS_ERR_NOMEM;
     int rc = mbedtls_x509_crt_parse(&c->trust, copy, len + 1);
@@ -238,9 +296,14 @@ int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len)
     return rc;
 }
 
-int32_t ktls_config_crl_file(ktls_config *c, const char *path)
+int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_trust_pem_locked(c, pem, len));
+}
+
+static int32_t ktls_config_crl_file_locked(ktls_config *c, const char *path)
+{
     int rc = mbedtls_x509_crl_parse_file(&c->crl, path);
     if (rc != 0) return rc;
     c->crl_loaded = 1;
@@ -248,9 +311,14 @@ int32_t ktls_config_crl_file(ktls_config *c, const char *path)
     return 0;
 }
 
-int32_t ktls_config_crl_pem(ktls_config *c, const uint8_t *data, size_t len)
+int32_t ktls_config_crl_file(ktls_config *c, const char *path)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_crl_file_locked(c, path));
+}
+
+static int32_t ktls_config_crl_pem_locked(ktls_config *c, const uint8_t *data, size_t len)
+{
     /* PEM wants the buffer NUL-terminated with the NUL counted; DER takes its exact length. */
     int rc;
     if (ktls_is_pem(data, len)) {
@@ -267,11 +335,18 @@ int32_t ktls_config_crl_pem(ktls_config *c, const uint8_t *data, size_t len)
     return 0;
 }
 
+int32_t ktls_config_crl_pem(ktls_config *c, const uint8_t *data, size_t len)
+{
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_crl_pem_locked(c, data, len));
+}
+
 int32_t ktls_config_crl_complete(ktls_config *c, int32_t on)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int32_t rc = ktls_change_begin(c);
+    if (rc != 0) return rc;
     c->crl_complete = on ? 1 : 0;
-    return 0;
+    return ktls_change_end(c, 0);
 }
 
 /* A complete identity joins the configuration. The first is also Mbed TLS's own certificate: the one a handshake
@@ -321,9 +396,8 @@ static int ktls_pair_matches(const mbedtls_pk_context *pub, const mbedtls_pk_con
    certificate is this side's, the rest its chain), then the private key, which must decrypt with the password
    and pair with the first certificate. Only then does the identity join the configuration; until then a wrong
    key can be followed by the right one. Each step takes PEM or DER. */
-int32_t ktls_config_certificate_chain(ktls_config *c, const uint8_t *data, size_t len)
+static int32_t ktls_config_certificate_chain_locked(ktls_config *c, const uint8_t *data, size_t len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
     int rc = ktls_config_identity_may_start(c);
     if (rc != 0) return rc;
     ktls_identity *id = ktls_identity_new();
@@ -343,9 +417,15 @@ int32_t ktls_config_certificate_chain(ktls_config *c, const uint8_t *data, size_
     return 0;
 }
 
-int32_t ktls_config_private_key(ktls_config *c, const uint8_t *data, size_t len, const uint8_t *password, size_t password_len)
+int32_t ktls_config_certificate_chain(ktls_config *c, const uint8_t *data, size_t len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_certificate_chain_locked(c, data, len));
+}
+
+static int32_t ktls_config_private_key_locked(ktls_config *c, const uint8_t *data, size_t len, const uint8_t *password,
+                                              size_t password_len)
+{
     ktls_identity *id = c->pending;
     if (id == NULL) return KTLS_ERR_INPUT;   /* the chain comes first */
     const uint8_t *pw = password_len > 0 ? password : NULL;
@@ -366,10 +446,15 @@ int32_t ktls_config_private_key(ktls_config *c, const uint8_t *data, size_t len,
     return 0;
 }
 
-/* Both steps, from files: an unreadable file is Mbed TLS's FILE_IO error for that step. */
-int32_t ktls_config_identity_files(ktls_config *c, const char *cert, const char *key, const char *password)
+int32_t ktls_config_private_key(ktls_config *c, const uint8_t *data, size_t len, const uint8_t *password, size_t password_len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_private_key_locked(c, data, len, password, password_len));
+}
+
+/* Both steps, from files: an unreadable file is Mbed TLS's FILE_IO error for that step. */
+static int32_t ktls_config_identity_files_locked(ktls_config *c, const char *cert, const char *key, const char *password)
+{
     int rc = ktls_config_identity_may_start(c);
     if (rc != 0) return rc;
     ktls_identity *id = ktls_identity_new();
@@ -383,20 +468,34 @@ int32_t ktls_config_identity_files(ktls_config *c, const char *cert, const char 
     return rc;
 }
 
-/* Both steps, from bytes. A failure leaves no half-loaded identity behind. */
-int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cert_len,
-                                 const uint8_t *key, size_t key_len, const uint8_t *password, size_t password_len)
+int32_t ktls_config_identity_files(ktls_config *c, const char *cert, const char *key, const char *password)
 {
-    int rc = ktls_config_certificate_chain(c, cert, cert_len);
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_identity_files_locked(c, cert, key, password));
+}
+
+/* Both steps, from bytes, under one hold of the lock. A failure leaves no half-loaded identity behind. */
+static int32_t ktls_config_identity_pem_locked(ktls_config *c, const uint8_t *cert, size_t cert_len,
+                                               const uint8_t *key, size_t key_len, const uint8_t *password,
+                                               size_t password_len)
+{
+    int rc = ktls_config_certificate_chain_locked(c, cert, cert_len);
     if (rc != 0) return rc;
-    rc = ktls_config_private_key(c, key, key_len, password, password_len);
+    rc = ktls_config_private_key_locked(c, key, key_len, password, password_len);
     if (rc != 0) { ktls_identity_free(c->pending); c->pending = NULL; }
     return rc;
 }
 
-int32_t ktls_config_alpn(ktls_config *c, const uint8_t *protocol, size_t len)
+int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cert_len,
+                                 const uint8_t *key, size_t key_len, const uint8_t *password, size_t password_len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_identity_pem_locked(c, cert, cert_len, key, key_len,
+                                                                             password, password_len));
+}
+
+static int32_t ktls_config_alpn_locked(ktls_config *c, const uint8_t *protocol, size_t len)
+{
     if (len == 0 || len > 255 || c->alpn_count >= KTLS_MAX_ALPN) return KTLS_ERR_INPUT;
     char *name = malloc(len + 1);
     if (name == NULL) return KTLS_ERR_NOMEM;
@@ -407,20 +506,35 @@ int32_t ktls_config_alpn(ktls_config *c, const uint8_t *protocol, size_t len)
     return mbedtls_ssl_conf_alpn_protocols(&c->conf, (const char *const *)c->alpn);
 }
 
-int32_t ktls_config_versions(ktls_config *c, int32_t min, int32_t max)
+int32_t ktls_config_alpn(ktls_config *c, const uint8_t *protocol, size_t len)
 {
-    if (!ktls_mutable(c)) return KTLS_ERR_FROZEN;
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_alpn_locked(c, protocol, len));
+}
+
+static int32_t ktls_config_versions_locked(ktls_config *c, int32_t min, int32_t max)
+{
     if (min < 0x0303 || max > 0x0304 || min > max) return KTLS_ERR_INPUT;
     mbedtls_ssl_conf_min_tls_version(&c->conf, (mbedtls_ssl_protocol_version)min);
     mbedtls_ssl_conf_max_tls_version(&c->conf, (mbedtls_ssl_protocol_version)max);
     return 0;
 }
 
-int32_t ktls_config_trust_count(const ktls_config *c)
+int32_t ktls_config_versions(ktls_config *c, int32_t min, int32_t max)
 {
-    if (!c->trust_loaded) return 0;
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_versions_locked(c, min, max));
+}
+
+/* 0 also when the lock cannot be taken: a count, not a verdict. */
+int32_t ktls_config_trust_count(ktls_config *c)
+{
+    if (ktls_lock(c) != 0) return 0;
     int32_t n = 0;
-    for (const mbedtls_x509_crt *crt = &c->trust; crt != NULL && crt->raw.len > 0; crt = crt->next) n++;
+    if (c->trust_loaded) {
+        for (const mbedtls_x509_crt *crt = &c->trust; crt != NULL && crt->raw.len > 0; crt = crt->next) n++;
+    }
+    ktls_unlock(c);
     return n;
 }
 
@@ -599,22 +713,36 @@ static int ktls_bio_recv(void *ctx, unsigned char *buf, size_t len)
     return (int)n;
 }
 
+/* Whether a session may be made from the configuration, read under its lock. */
+static int32_t ktls_session_may_start(const ktls_config *c, int has_name)
+{
+    if (c->server && c->identities == NULL) return KTLS_ERR_INPUT;
+    /* Verifying needs something to verify against; a server that only asks for a certificate (3) does not. */
+    if ((c->verify == 1 || c->verify == 2) && !c->trust_loaded) return KTLS_ERR_NOTRUST;
+    /* Only full verification needs a name to compare; chain-only and none may go without one (and without SNI). */
+    if (!c->server && c->verify == 2 && !has_name) return KTLS_ERR_INPUT;
+    return 0;
+}
+
 ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t *err)
 {
     *err = 0;
-    if (c->server && c->identities == NULL) { *err = KTLS_ERR_INPUT; return NULL; }
-    /* Verifying needs something to verify against; a server that only asks for a certificate (3) does not. */
-    if ((c->verify == 1 || c->verify == 2) && !c->trust_loaded) { *err = KTLS_ERR_NOTRUST; return NULL; }
     int has_name = server_name != NULL && server_name[0] != 0;
-    /* Only full verification needs a name to compare; chain-only and none may go without one (and without SNI). */
-    if (!c->server && c->verify == 2 && !has_name) { *err = KTLS_ERR_INPUT; return NULL; }
     ktls_session *s = calloc(1, sizeof *s);
     if (s == NULL) { *err = KTLS_ERR_NOMEM; return NULL; }
-    atomic_store_explicit(&c->frozen, 1, memory_order_release);
+    /* The checks and the freeze are one step under the lock, so no setter changes the configuration between them,
+       or after: from here on it is read without the lock. */
+    int32_t rc = ktls_lock(c);
+    if (rc == 0) {
+        rc = ktls_session_may_start(c, has_name);
+        if (rc == 0) c->frozen = 1;
+        ktls_unlock(c);
+    }
+    if (rc != 0) { *err = rc; free(s); return NULL; }
     ktls_config_retain(c);
     s->config = c;
     mbedtls_ssl_init(&s->ssl);
-    int rc = mbedtls_ssl_setup(&s->ssl, &c->conf);
+    rc = mbedtls_ssl_setup(&s->ssl, &c->conf);
     mbedtls_ssl_set_user_data_p(&s->ssl, s);
     /* A client sends its name as SNI and, under full verification, checks the certificate against it (chain-only
        mode clears just the mismatch). With no name it sends no SNI and compares no name, which Mbed TLS 4 wants

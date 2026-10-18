@@ -8,7 +8,10 @@ export { TlsConfig };
 // It is shared, not copied: `share()` hands out another handle on the same configuration (an atomic
 // reference count in C), and every session made from it holds one too. So one configuration serves a whole
 // connection pool, on any isolate. Once a session exists it is frozen, and a setter answers
-// `TlsError::Config` instead of changing it under a live session.
+// `TlsError::Config` (code -4) instead of changing it under a live session. Setters on handles in different
+// isolates may run at once, and while a session is being made: each takes effect whole or not at all. Which one
+// comes first is the scheduler's call, so a program that needs to know what its sessions get configures before
+// it shares.
 
 extern "ktls.h";
 extern fn UnsafePtr ktls_config_new(int32 server);

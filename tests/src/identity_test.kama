@@ -7,7 +7,7 @@ import { std::io::IoError, std::collections::DynamicArray, std::collections::Fix
          tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
          tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome,
          tls_tests::keyPassword };
-export { identityTests };
+export { identityTests, codeOf };
 
 fn DynamicArray<uint8> bytesOf(const ref string name) {
     Result<DynamicArray<uint8>, IoError> read = readFile(path: certPath(name: name));

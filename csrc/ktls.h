@@ -31,7 +31,9 @@ size_t ktls_strlen(const uint8_t *s);
 
 /* ---- configuration: one per role, shared by every session made from it ---------------------------------
    Reference-counted with an atomic count, so a configuration (and Mbed TLS's ssl_config inside it, which is
-   read-only once in use) can be shared by sessions on any thread. Mutators refuse once a session exists. */
+   read-only once in use) can be shared by sessions on any thread. Mutators refuse once a session exists. Every
+   mutator, ktls_config_trust_count and ktls_session_new take the configuration's lock, so handles on several
+   threads may call them at once. */
 typedef struct ktls_config ktls_config;
 
 ktls_config *ktls_config_new(int32_t server);          /* NULL on allocation failure */
@@ -58,7 +60,7 @@ int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cer
                                  const uint8_t *key, size_t key_len, const uint8_t *password, size_t password_len);
 int32_t ktls_config_alpn(ktls_config *c, const uint8_t *protocol, size_t len);   /* append one, in preference order */
 int32_t ktls_config_versions(ktls_config *c, int32_t min, int32_t max);         /* 0x0303 TLS 1.2, 0x0304 TLS 1.3 */
-int32_t ktls_config_trust_count(const ktls_config *c);                           /* CA certificates loaded */
+int32_t ktls_config_trust_count(ktls_config *c);                                 /* CA certificates loaded */
 /* Certificate revocation lists: a PEM or DER file, or PEM/DER bytes; each call adds to the set. */
 int32_t ktls_config_crl_file(ktls_config *c, const char *path);
 int32_t ktls_config_crl_pem(ktls_config *c, const uint8_t *data, size_t len);
