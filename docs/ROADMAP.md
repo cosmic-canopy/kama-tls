@@ -12,7 +12,9 @@ no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Senda
 server hold several identities and choose one per handshake by SNI (phase 5).
 
 **Next: phase 6, a race on shared configurations** ([Shared configurations](#shared-configurations)): a small fix
-with its design written, to ship as 0.1.5. Then phase 7, [session resumption](#session-resumption).
+with its design written, to ship as 0.1.5. Then every platform kama builds for ([Platforms](#platforms)), then
+session resumption on TLS 1.3 and 1.2 ([Session resumption](#session-resumption)). The maintainer settled the scope
+questions on 2026-10-18; the decisions are recorded in each section.
 
 | # | phase | state |
 |---|---|---|
@@ -24,8 +26,11 @@ with its design written, to ship as 0.1.5. Then phase 7, [session resumption](#s
 | 4 | RFC 9266 tls-exporter channel binding as `TlsStream.tlsExporter()`, TLS 1.3 only ([issue #1](https://github.com/cosmic-canopy/kama-tls/issues/1)); see [Channel bindings](#channel-bindings) | **done** (0.1.2, 2026-10-13) |
 | 5 | A server holds several identities and serves each handshake the ones whose certificate names the SNI host; see [Server identities](#server-identities) | **done** (0.1.4, unpublished) |
 | 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **next** (0.1.5) |
-| 7 | Session resumption: tickets on the server, a resumable session on the client; see [Session resumption](#session-resumption) | planned |
-| 8 | Windows; see [Windows](#windows) | **the maintainer's call** |
+| 7 | Windows; see [Platforms](#platforms) | planned |
+| 8 | WebAssembly (`--target WASM`), the wasm leg `AGENTS.package.md` asks of a package that vendors C; see [Platforms](#platforms) | planned |
+| 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | planned |
+| 10 | Session resumption on TLS 1.2; see [Session resumption](#session-resumption) | planned |
+| 11 | Bare metal (`--target EMBEDDED`); see [Platforms](#platforms) | planned, questions first |
 
 ## Channel bindings
 
@@ -127,9 +132,31 @@ would have to be 0.2.0.
 
 ## Session resumption
 
-Phase 7. Neither side resumes a session today. Settle the open questions below with the maintainer, write
-the decisions here, then build it as phases 4 and 5 were built: a design in this section, tests in `tests/`, the
-gate on macOS arm64 and Linux aarch64, and one version.
+Phases 9 (TLS 1.3) and 10 (TLS 1.2). Neither side resumes a session today. Build each the way phases 4 and 5 were
+built: a design in this section, tests in `tests/`, the gate on every platform the package then supports, and one
+version per phase.
+
+**Decided (the maintainer, 2026-10-18).**
+- **Both versions, as production TLS stacks resume both** (OpenSSL, Go, rustls). TLS 1.3 comes first; TLS 1.2
+  follows as its own phase. Neither has a security reason to leave out, given the two rules below.
+- **TLS 1.3 resumes only with a fresh (EC)DHE** (psk_dhe_ke), so a resumed session keeps forward secrecy. Pure PSK
+  (psk_ke) is never accepted or offered: `mbedtls_ssl_conf_tls13_key_exchange_modes` is set without
+  `MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK`.
+- **TLS 1.2 resumes only a session made with extended master secret** (RFC 7627), which shuts out the
+  triple-handshake attack. Mbed TLS negotiates EMS by default (`MBEDTLS_SSL_EXTENDED_MASTER_SECRET`) but has no
+  "required" switch, so ktls enforces it. It neither issues nor accepts a ticket, and caches no session ID, for a
+  session without EMS.
+  - A TLS 1.2 ticket carries the master secret encrypted under the ticket key, so a stolen ticket key decrypts every
+    session resumed under it until the key rotates. The API comment says so.
+  - Rotation is not optional.
+  - Phase 10 covers both TLS 1.2 mechanisms: tickets (RFC 5077) and the server's session-ID cache (`ssl_cache.c`),
+    for clients that send no ticket.
+- **A client's `TlsSession` lives in memory only.** It is not saved to bytes, so the resumption secret never becomes
+  data a caller stores.
+- **Still open, for the phase 9 session to propose and the maintainer to confirm:** the default ticket lifetime and
+  key rotation, and whether a caller can set them. Reference points: Go rotates its ticket keys daily and accepts a
+  ticket for up to 7 days, and nginx's session timeout defaults to 5 minutes. Keep it short, because a resumed session
+  is not re-verified.
 
 **What the vendored Mbed TLS 4.1.1 has.** Our configuration keeps upstream's defaults for all of this:
 - `MBEDTLS_SSL_SESSION_TICKETS`, `MBEDTLS_SSL_TICKET_C` and `MBEDTLS_SSL_CACHE_C` are on, and `ssl_ticket.c` and
@@ -168,23 +195,25 @@ gate on macOS arm64 and Linux aarch64, and one version.
 - **Test the peer accessors on a resumed session:** `peerCertificate()`, `peerNames()` and `tlsServerEndPoint()`
   rely on `MBEDTLS_SSL_KEEP_PEER_CERTIFICATE` (on). Also test that `tlsExporter()` still differs from session to
   session.
-- **TLS 1.2 resumption,** if offered, only with extended master secret (Mbed TLS's default), because of the
-  triple-handshake attack again.
-
-**Open questions for the maintainer**
-1. TLS 1.3 only, or TLS 1.2 as well?
-2. The default ticket lifetime, and whether a caller can set it.
-3. Whether a `TlsSession` can be saved to bytes (`mbedtls_ssl_session_save` / `_load`), for a cache that outlives
-   a process. That turns a secret into data the caller stores.
+- **A TLS 1.3 resumption that offers pure PSK is refused,** and a TLS 1.2 session without EMS is never resumed (see
+  the decisions above). Each gets a test.
 
 **Payoff.** A TLS 1.3 resumption skips the certificate and its signature, not a round trip; only 0-RTT saves a
 round trip, and it stays off. So the gain is CPU on both sides, and the size of the server's certificate on the
 wire.
 
-## Windows
+## Platforms
 
-Phase 8, **the maintainer's call**. kama builds for Windows (`--target WINDOWS`, with mingw-w64 or zig), so whether
-this package does is a scope decision, not a technical block. It has never been built there. What it takes:
+**Decided (the maintainer, 2026-10-18): every platform kama builds for.** Tested today: macOS arm64 and Linux
+aarch64 locally, Linux x86-64 and macOS arm64 in CI. kama's targets are `HOST`, `MACOS`, `WINDOWS`, `LINUX`, `WASM`
+and `EMBEDDED`, so what remains is Windows, WebAssembly and bare metal. A leg is green when `tools/test.sh` (or its
+equivalent for that target) passes there, debug and release.
+
+### Windows (phase 7)
+
+kama builds for Windows (`--target WINDOWS`, with mingw-w64 or zig). The package has never been built there. The
+gate's Windows leg is CI's `windows-latest`. The maintainer has a Windows machine for a local run when CI is not
+enough: ask for one rather than guess at a failure. What it takes:
 
 - **Threading.**
   - Today `csrc/ktls_crypto_user_config.h` turns on `MBEDTLS_THREADING_C` and `MBEDTLS_THREADING_PTHREAD` only off
@@ -203,6 +232,30 @@ this package does is a scope decision, not a technical block. It has never been 
 - **The gate.** A `windows-latest` leg in `.github/workflows/ci.yml` runs `tools/test.sh` with OpenSSL 3 for
   `tools/gen-certs.sh`, including the TCP test with its server in another isolate. Then remove "Windows is not in
   the matrix" there, and update the README's platform line.
+
+### WebAssembly (phase 8)
+
+`AGENTS.package.md` asks every package that vendors C for a wasm leg (`--target WASM`, run under node in a container
+with emcc), and this package has none yet. To settle first, by building rather than reading:
+- **Threading.** Whether kama's wasm target has threads (isolates) at all, and so whether `MBEDTLS_THREADING_C`
+  stays on there. Without threads it comes off for wasm only, with the reason written in
+  `csrc/ktls_crypto_user_config.h`.
+- **Entropy.** Mbed TLS's builtin source on emscripten. `getentropy` is backed by `crypto.getRandomValues`; confirm
+  that this is the path Mbed TLS takes.
+- **I/O.** `TlsStream<S>` needs only a `ReliableStream`, so a TLS session over whatever stream the wasm host gives
+  (a WebSocket, a pipe) works unchanged. The tests' in-memory pipe runs as it is. The loopback-TCP case and the
+  file-based fixtures (`trustFile`, `identityFiles`, `trustSystem`) need a gate (`@compileFor`) or a wasm
+  equivalent: fixtures as bytes through `trustPem` / `identityPem`.
+
+### Bare metal (phase 11, questions first)
+
+Mbed TLS is built for small devices, so `--target EMBEDDED` is possible. It needs answers before any code:
+- **Entropy.** There is no OS source, so the device must supply one. Through which hook, a PSA entropy driver or a
+  callback the caller registers?
+- **Memory.** Whether the target has a heap, since Mbed TLS allocates per session.
+- **Threading.** Whether it has threads.
+- **Which API survives.** The file-based calls (`trustFile`, `identityFiles`, `trustSystem`, `revocationDir`) do
+  not exist without a filesystem.
 
 ## Known differences from OpenSSL-based clients
 
