@@ -6,7 +6,9 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
-Version 0.1.4. Needs **kama ≥ 0.9.523**.
+## [0.1.4] — 2026-10-18
+
+Needs **kama ≥ 0.9.523**.
 
 ### Added
 - **A server holds several identities and chooses one per handshake by SNI.** Each is loaded as before
