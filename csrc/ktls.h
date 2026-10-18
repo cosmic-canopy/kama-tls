@@ -70,10 +70,11 @@ int32_t ktls_config_crl_complete(ktls_config *c, int32_t on);
 /* ---- session ------------------------------------------------------------------------------------------ */
 typedef struct ktls_session ktls_session;
 
-/* A client or a server session; retains the configuration. A client's `server_name` is sent as SNI, whatever
-   it holds (an IP address too: Mbed TLS does not tell them apart), and full verification compares the
-   certificate with it, so full verification needs one. Under chain-only or no verification it may be empty or
-   NULL: no SNI is sent and no name is compared. NULL on failure, the reason in *err. */
+/* A client or a server session; retains the configuration. A client's `server_name` is sent as SNI, unless it
+   is an IP literal (RFC 6066 forbids one), and full verification compares the certificate with it: a host name
+   with the certificate's names, an IP literal with its IP SANs alone. So full verification needs one. Under
+   chain-only or no verification it may be empty or NULL: no SNI is sent and no name is compared. NULL on
+   failure, the reason in *err. */
 ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t *err);
 void ktls_session_free(ktls_session *s);
 

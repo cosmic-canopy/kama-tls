@@ -88,9 +88,10 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         this.failedWith = 0;
     }
 
-    // A client session over `inner`. `serverName` is sent as SNI, as it is (an IP address too), and under
-    // `Verify::Full` it is the name the server's certificate must carry (a DNS name or an IP address), so Full
-    // needs one. Under `Verify::Chain` or `Verify::None` it may be "": then no SNI is sent and no name is
+    // A client session over `inner`. `serverName` is sent as SNI, unless it is an IP literal (v4 or v6, which
+    // RFC 6066 forbids sending), and under `Verify::Full` it is the name the server's certificate must carry: a
+    // host name among its DNS names (or its common name, when it has no SANs), an IP literal among its IP SANs.
+    // So Full needs one. Under `Verify::Chain` or `Verify::None` it may be "": then no SNI is sent and no name is
     // compared, and a caller that checks names itself does so with `peerNames()`. The handshake runs on first
     // use, or explicitly with `handshake()`.
     public unsafe ctor Result<TlsStream<S>, TlsError> client(S inner, const ref TlsConfig config,

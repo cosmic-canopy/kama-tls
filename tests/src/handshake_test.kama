@@ -181,9 +181,33 @@ fn int32 verificationTests() {
     Outcome o11 = attempt(mode: Verify::Chain, ca: other, certName: srvCrt, keyName: srvKey, name: none);
     f = f + check(ok: rejectedWith(o: o11, want: BADCERT_NOT_TRUSTED), what: "verify: Chain with no name still rejects an untrusted CA (".concat(other: describe(o: o11)).concat(other: ")"));
 
+    // An IP literal is never sent as SNI (request_test.kama), so Full compares it here, with the IP SANs alone.
+    string loopback6 = "::1";
+    Outcome o12 = attempt(mode: Verify::Full, ca: ca, certName: srvCrt, keyName: srvKey, name: loopback6);
+    f = f + check(ok: completed(o: o12), what: "verify: Full by IPv6 address against an IP SAN (".concat(other: describe(o: o12)).concat(other: ")"));
+    Outcome o13 = attempt(mode: Verify::Full, ca: ca, certName: wrongCrt, keyName: wrongKey, name: loopback);
+    f = f + check(ok: rejectedWith(o: o13, want: BADCERT_CN_MISMATCH), what: "verify: Full by IP address rejects a certificate without that IP (".concat(other: describe(o: o13)).concat(other: ")"));
+    string cnIpCrt = "cn-ip.crt"; string cnIpKey = "cn-ip.key";
+    Outcome o14 = attempt(mode: Verify::Full, ca: ca, certName: cnIpCrt, keyName: cnIpKey, name: loopback);
+    f = f + check(ok: rejectedWith(o: o14, want: BADCERT_CN_MISMATCH), what: "verify: Full by IP address takes an IP SAN, never the common name (".concat(other: describe(o: o14)).concat(other: ")"));
+    Outcome o15 = attempt(mode: Verify::Chain, ca: ca, certName: wrongCrt, keyName: wrongKey, name: loopback);
+    f = f + check(ok: completed(o: o15), what: "verify: Chain by IP address accepts another name that chains (".concat(other: describe(o: o15)).concat(other: ")"));
+    Outcome o16 = attempt(mode: Verify::Chain, ca: other, certName: srvCrt, keyName: srvKey, name: loopback);
+    f = f + check(ok: rejectedWith(o: o16, want: BADCERT_NOT_TRUSTED), what: "verify: Chain by IP address still rejects an untrusted CA (".concat(other: describe(o: o16)).concat(other: ")"));
+
     f = f + noTrustTest();
     f = f + fullNeedsNameTest();
+    f = f + sendableTest();
     return f;
+}
+
+// A TlsError is Sendable, so an error type that crosses isolates may carry one: this compiles only if it is.
+type enum Carried implements Sendable { Failed(TlsError error), Fine }
+
+fn int32 sendableTest() {
+    Carried c = Carried::Failed(error: TlsError::Closed);
+    bool held = match (c) { case Failed(error: e): match (e) { case Closed: true; case _: false; }; case Fine: false; };
+    return check(ok: held, what: "TlsError is Sendable: a Sendable enum carries one");
 }
 
 // Full verification compares a name, so a client without one is refused before it sends a byte.

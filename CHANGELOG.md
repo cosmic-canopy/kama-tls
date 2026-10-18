@@ -6,6 +6,23 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-10-18
+
+Needs **kama ≥ 0.9.523**. Verified on kama 0.9.523, 0.9.667 and 0.9.668, debug and release, on macOS arm64 and Linux
+aarch64. Asked for by `@kama/redis`, whose connections carry their errors between isolates and connect by IP address.
+
+### Changed
+- **An IP literal given as a client's server name is no longer sent as SNI** (RFC 6066, section 3: "Literal IPv4 and
+  IPv6 addresses are not permitted in HostName"), under any `Verify` mode. Go, CPython, rustls and Node send none
+  either. Before, Mbed TLS sent whatever name it was given.
+- **Under `Verify::Full`, an IP literal is matched against the certificate's IP SANs alone**, as OpenSSL's
+  `X509_check_ip` and Go's `crypto/x509` match one. Before, Mbed TLS also compared it with the DNS SANs as text, and
+  with the common name of a certificate that has no SANs, so a certificate whose CN read `127.0.0.1` passed for that
+  address; it is now refused (`BADCERT_CN_MISMATCH`). A host name is matched as before.
+
+### Added
+- `TlsError` is `Sendable`, so an error type that crosses isolates can carry one. Every payload already was.
+
 ## [0.1.2] — 2026-10-13
 
 Needs **kama ≥ 0.9.523**.

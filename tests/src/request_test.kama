@@ -49,6 +49,18 @@ fn int32 requestedCase(int32 policy, bool withCertificate, bool tls12, bool want
 
 fn int32 sniCase(const ref string name, bool wantSent, const ref string what) {
     TlsConfig c = client(withCertificate: false, tls12: false);
+    return sniWith(c: c, name: name, wantSent: wantSent, what: what);
+}
+
+// The same, with full verification: a name the certificate carries.
+fn int32 sniFull(const ref string name, bool wantSent, const ref string what) {
+    string ca = "ca.crt";
+    Result<TlsConfig, TlsError> made = clientConfig(mode: Verify::Full, caName: ca);
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": client config")); } };
+    return sniWith(c: c, name: name, wantSent: wantSent, what: what);
+}
+
+fn int32 sniWith(const ref TlsConfig c, const ref string name, bool wantSent, const ref string what) {
     TlsConfig s = server(policy: 0);
     Result<Session, TlsError> made = connect(client: c, server: s, name: name);
     Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: what.concat(other: ": session")); } };
@@ -72,5 +84,13 @@ fn int32 requestTests() {
     string none = "";
     f = f + sniCase(name: localhost, wantSent: true, what: "sni: a client's name reaches the server");
     f = f + sniCase(name: none, wantSent: false, what: "sni: a client with no name sends none");
+    // RFC 6066, section 3: "Literal IPv4 and IPv6 addresses are not permitted in HostName."
+    string v4 = "127.0.0.1";
+    string v6 = "::1";
+    f = f + sniCase(name: v4, wantSent: false, what: "sni: an IPv4 literal is not sent (Chain)");
+    f = f + sniCase(name: v6, wantSent: false, what: "sni: an IPv6 literal is not sent (Chain)");
+    f = f + sniFull(name: v4, wantSent: false, what: "sni: an IPv4 literal is not sent (Full)");
+    f = f + sniFull(name: v6, wantSent: false, what: "sni: an IPv6 literal is not sent (Full)");
+    f = f + sniFull(name: localhost, wantSent: true, what: "sni: a host name is sent (Full)");
     return f;
 }

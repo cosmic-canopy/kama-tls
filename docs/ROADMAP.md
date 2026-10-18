@@ -7,7 +7,9 @@ and PEM errors), the RFC 5929 SHA-224 fix, chain verification without SNI, certi
 file, CRLs with OpenSSL's every-certificate rule, whether the server asked for a client certificate, a step-wise
 identity with a pair check, and key logging. 0.1.0 is published on the official registry. 0.1.1 (2026-10-03)
 adds what the registry shows and searches (a description, the repository, keywords), so it needs kama 0.9.523.
-0.1.2 (2026-10-13) adds the RFC 9266 tls-exporter channel binding, `TlsStream.tlsExporter()` (phase 4).
+0.1.2 (2026-10-13) adds the RFC 9266 tls-exporter channel binding, `TlsStream.tlsExporter()` (phase 4). 0.1.3
+(2026-10-18), asked for by `@kama/redis`, sends no IP literal as SNI, matches one against IP SANs alone, and makes
+`TlsError` `Sendable`.
 
 | # | phase | state |
 |---|---|---|
@@ -57,10 +59,6 @@ XMPP package built on it.
 
 ## Known differences from OpenSSL-based clients
 
-- **An IP address given as the server name is also sent as SNI.** Mbed TLS sends whatever name it is given, and
-  RFC 6066 says an IP literal should not be sent. Servers ignore it in practice (PostgreSQL does). A caller that
-  must not send one passes "" under `Verify::Chain` and checks the names from `peerNames()` itself, as
-  @kama/postgres does for libpq's rules.
 - **As a TLS 1.3 server, Mbed TLS sends a client-authentication alert under its handshake keys** (it switches to
   the application keys only at wrap-up), so a client that has already switched cannot read it and reports a bad
   MAC instead of `certificate_required`. OpenSSL switches at its own Finished. This matters only when this package

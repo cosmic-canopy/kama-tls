@@ -10,6 +10,7 @@
 #   server.crt / server.key      RSA-2048, CN=localhost, SAN localhost / 127.0.0.1 / ::1
 #   server-ec.crt / .key         ECDSA P-256, the same names
 #   wronghost.crt / .key         RSA, CN and SAN wrong.example: a hostname check must fail
+#   cn-ip.crt / .key             RSA, CN=127.0.0.1 and no SAN at all: an IP address is named only by an IP SAN
 #   expired.crt / .key           RSA, localhost, valid 2020-01-01 to 2021-01-01: must fail as expired
 #   client.crt / client.key      RSA, CN=tls-client, clientAuth: for servers that require a client cert
 #   client-pkcs8.key             client.key encrypted as PKCS#8 (PBES2, AES-256-CBC, HMAC-SHA256)
@@ -35,7 +36,7 @@ DIR="$ROOT/out/test-certs"
 OPENSSL=${OPENSSL:-openssl}
 
 # Bump GENERATION when the set of files changes, so an older out/test-certs is regenerated rather than used.
-GENERATION=4
+GENERATION=5
 KEY_PASSWORD='kama-tls test key pw'
 if [ "$(cat "$DIR/.generation" 2>/dev/null)" = "$GENERATION" ] && [ "${1:-}" != "--force" ]; then
     exit 0
@@ -85,6 +86,10 @@ basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = DNS:wrong.example
+[nosan]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
 [client]
 basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
@@ -116,6 +121,7 @@ leaf() {
 leaf server     localhost     server    rsa
 leaf server-ec  localhost     server    ec
 leaf wronghost  wrong.example wronghost rsa
+leaf cn-ip      127.0.0.1     nosan     rsa
 leaf expired    localhost     server    rsa 20200101000000Z 20210101000000Z
 leaf client     tls-client    client    rsa
 

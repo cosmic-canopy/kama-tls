@@ -396,7 +396,35 @@ struct ktls_session {
     int32_t cert_requested;   /* a client: the server sent a CertificateRequest */
     char *sni;                /* a server: the name the client sent as SNI, NULL if none */
     ktls_buffer keylog;       /* NSS key-log lines not yet taken (ktls_session_keylog) */
+    unsigned char ip[16];     /* a client given an IP literal as its server name: the address, 4 or 16 bytes */
+    size_t ip_len;            /* 0 when the server name is not an IP literal */
 };
+
+/* Whether the certificate carries `ip` (4 or 16 bytes) as an iPAddress subject alternative name. Only an IP SAN
+   counts, as in OpenSSL's X509_check_ip and Go's crypto/x509: neither a DNS SAN nor the common name names an
+   address. */
+static int ktls_san_has_ip(const mbedtls_x509_crt *crt, const unsigned char *ip, size_t ip_len)
+{
+    if (!(crt->ext_types & MBEDTLS_X509_EXT_SUBJECT_ALT_NAME)) return 0;
+    for (const mbedtls_x509_sequence *cur = &crt->subject_alt_names; cur != NULL; cur = cur->next) {
+        unsigned char type = (unsigned char)cur->buf.tag & MBEDTLS_ASN1_TAG_VALUE_MASK;
+        if (type == MBEDTLS_X509_SAN_IP_ADDRESS && cur->buf.len == ip_len && memcmp(cur->buf.p, ip, ip_len) == 0) return 1;
+    }
+    return 0;
+}
+
+/* A client whose server name is an IP literal: RFC 6066 (section 3) forbids sending it as SNI, so the session
+   gives Mbed TLS no name at all (no SNI, no name compared by Mbed TLS) and compares the address here, on the leaf,
+   under full verification. The configuration's callback runs first, as it does for every other session. */
+static int ktls_verify_ip_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
+{
+    const ktls_session *s = ctx;
+    int rc = ktls_verify_cb(s->config, crt, depth, flags);
+    if (depth == 0 && s->config->verify == 2 && !ktls_san_has_ip(crt, s->ip, s->ip_len)) {
+        *flags |= (uint32_t)MBEDTLS_X509_BADCERT_CN_MISMATCH;
+    }
+    return rc;
+}
 
 /* A server records the name a client asked for. Any name is accepted: the session serves its one identity. */
 static int ktls_sni_seen(void *ctx, mbedtls_ssl_context *ssl, const unsigned char *name, size_t len)
@@ -479,8 +507,11 @@ ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t 
     mbedtls_ssl_set_user_data_p(&s->ssl, s);
     /* A client sends its name as SNI and, under full verification, checks the certificate against it (chain-only
        mode clears just the mismatch). With no name it sends no SNI and compares no name, which Mbed TLS 4 wants
-       said explicitly. */
-    if (rc == 0 && !c->server) rc = mbedtls_ssl_set_hostname(&s->ssl, has_name ? server_name : NULL);
+       said explicitly. An IP literal is never sent as SNI (RFC 6066): Mbed TLS is given no name, and a session
+       callback compares the address with the certificate's IP SANs instead. */
+    if (rc == 0 && !c->server && has_name) s->ip_len = mbedtls_x509_crt_parse_cn_inet_pton(server_name, s->ip);
+    if (rc == 0 && !c->server) rc = mbedtls_ssl_set_hostname(&s->ssl, has_name && s->ip_len == 0 ? server_name : NULL);
+    if (rc == 0 && s->ip_len > 0) mbedtls_ssl_set_verify(&s->ssl, ktls_verify_ip_cb, s);
     if (rc != 0) { *err = rc; ktls_session_free(s); return NULL; }
     mbedtls_ssl_set_bio(&s->ssl, s, ktls_bio_send, ktls_bio_recv, NULL);
     return s;

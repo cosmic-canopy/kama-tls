@@ -47,8 +47,12 @@ maintainer's word.
 - **Mbed TLS 4 refuses a verifying client whose hostname was never set, but an explicit
   `mbedtls_ssl_set_hostname(NULL)` means "verify without a name".** So `Verify::Chain` (libpq's verify-ca) takes
   an empty server name: no SNI, no name compared. Given a name, it sends SNI, and a verify callback clears only
-  the leaf's CN-mismatch flag. Mbed TLS sends whatever name it is given as SNI, an IP address too, so a caller
-  that must not (libpq sends none for an IP) passes "" and checks names itself.
+  the leaf's CN-mismatch flag.
+- **Mbed TLS sends whatever name it is given as SNI, an IP literal too, and RFC 6066 forbids one.** So a session
+  whose server name is an IP literal gives Mbed TLS no name (`mbedtls_ssl_set_hostname(NULL)`), and a
+  per-session verify callback (`mbedtls_ssl_set_verify`, which takes precedence over the configuration's)
+  compares the address with the leaf's IP SANs under `Verify::Full` (`ktls_verify_ip_cb`). Only an IP SAN
+  names an address, as in OpenSSL's `X509_check_ip` and Go.
 - **An engine failure in a read, write or flush is an `Other` IoError, and the stream keeps its code.** std's
   `IoError` is a kind plus an OS code, and only std can attach a code, so the engine's cannot ride in it.
   `TlsStream.tlsError()` rebuilds the `TlsError` from the kept code: `Certificate` or `Handshake` before the

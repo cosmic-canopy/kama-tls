@@ -27,7 +27,7 @@ extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, is
 
 // Everything that can go wrong in this package, as data. Each variant that came from Mbed TLS keeps its
 // error code and its text, so a log line says what happened without a lookup.
-type enum TlsError implements Error {
+type enum TlsError implements Error, Sendable {
     // The PSA crypto core refused to start — no entropy source, most likely. `status` is its psa_status_t.
     CryptoInit(int32 status),
     // A configuration step failed: a file that does not parse, a key that does not match, a bad argument.
