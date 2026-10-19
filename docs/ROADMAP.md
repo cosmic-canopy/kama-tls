@@ -1,6 +1,6 @@
 # Roadmap
 
-Where this is, 2026-10-18: `TlsConfig`, `TlsStream<S>` and `Certificate` are done and tested, debug and release, on
+Where this is, 2026-10-19: `TlsConfig`, `TlsStream<S>` and `Certificate` are done and tested, debug and release, on
 macOS arm64 and Linux aarch64. Before 0.1.0 everything was exercised end to end against PostgreSQL 14–19, which added
 failures in words (alerts by name, key and PEM errors), the RFC 5929 SHA-224 fix, chain verification without SNI,
 certificate names from a session or a file, CRLs with OpenSSL's every-certificate rule, whether the server asked for a
@@ -9,12 +9,14 @@ client certificate, a step-wise identity with a pair check, and key logging.
 Published on the official registry: 0.1.0 (2026-10-02); 0.1.1 (2026-10-03), what the registry shows and searches, so
 it needs kama 0.9.523; 0.1.2 (2026-10-13), the RFC 9266 tls-exporter channel binding (phase 4); 0.1.3 (2026-10-18),
 no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Sendable`; 0.1.4 (2026-10-18), a server
-holds several identities and chooses one per handshake by SNI (phase 5). 0.1.5, unpublished, fixes a race on shared
-configurations (phase 6).
+holds several identities and chooses one per handshake by SNI (phase 5). 0.1.5 fixes a race on shared configurations
+(phase 6). It was pushed on 2026-10-19 with CI green on kama 0.9.523, and it waits for the registry. Once the
+registry has published it, the CHANGELOG heading takes the date, as `f56b16e` did for 0.1.4.
 
-**Next: every platform kama builds for** ([Platforms](#platforms)), Windows first (phase 7), then session resumption
-on TLS 1.3 and 1.2 ([Session resumption](#session-resumption)). The maintainer settled the scope questions on
-2026-10-18; the decisions are recorded in each section.
+**Next: every platform kama builds for** ([Platforms](#platforms)), starting with Windows (phase 7). Its section was
+checked against cross builds on 2026-10-19 and has two questions for the maintainer. After the platforms comes
+session resumption on TLS 1.3 and 1.2 ([Session resumption](#session-resumption)). The maintainer settled the scope
+questions on 2026-10-18; the decisions are recorded in each section.
 
 | # | phase | state |
 |---|---|---|
@@ -229,29 +231,67 @@ aarch64 locally, Linux x86-64 and macOS arm64 in CI. kama's targets are `HOST`, 
 and `EMBEDDED`, so what remains is Windows, WebAssembly and bare metal. A leg is green when `tools/test.sh` (or its
 equivalent for that target) passes there, debug and release.
 
-### Windows (phase 7)
+### Windows (phase 7, next)
 
-kama builds for Windows (`--target WINDOWS`, with mingw-w64 or zig). The package has never been built there. The
-gate's Windows leg is CI's `windows-latest`. The maintainer has a Windows machine for a local run when CI is not
-enough: ask for one rather than guess at a failure. What it takes:
+kama builds for Windows: `--target WINDOWS`, which is `<arch>-windows-gnu`, with mingw-w64 or zig. The gate's
+Windows leg is CI's `windows-latest`. The maintainer has a Windows machine for a local run when CI is not enough:
+ask for one rather than guess at a failure.
 
-- **Threading.**
-  - Today `csrc/ktls_crypto_user_config.h` turns on `MBEDTLS_THREADING_C` and `MBEDTLS_THREADING_PTHREAD` only off
-    `_WIN32`.
-  - Windows needs `MBEDTLS_THREADING_ALT`: a `csrc/threading_alt.h` defining `mbedtls_platform_mutex_t` and
-    `mbedtls_platform_condition_variable_t` over `SRWLOCK` and `CONDITION_VARIABLE`, plus
-    `mbedtls_threading_set_alt()` called once before `psa_crypto_init`.
-  - `ktls_init`'s atomic flag then becomes a real once (`InitOnceExecuteOnce`), because two isolates can race into
-    the first call.
-  - winpthreads under mingw would skip the ALT layer, but it adds a DLL and does not hold for every toolchain.
-- **Entropy.** Mbed TLS's builtin source calls `BCryptGenRandom`, so link `bcrypt` on Windows only: a `link` entry
-  `{ "name": "bcrypt", "compileFor": ["OS_WINDOWS"] }`.
-- **`trustSystem()`.** Windows has no CA bundle file. The general answer is to read the ROOT system store through
-  crypt32 (`CertOpenSystemStoreW`, with each certificate's DER added to the trust chain); `SSL_CERT_FILE` stays the
-  override.
-- **The gate.** A `windows-latest` leg in `.github/workflows/ci.yml` runs `tools/test.sh` with OpenSSL 3 for
-  `tools/gen-certs.sh`, including the TCP test with its server in another isolate. Then remove "Windows is not in
-  the matrix" there, and update the README's platform line.
+**Checked on 2026-10-19, by cross-building the tests from macOS with zig 0.16.0.** Nothing has run on Windows yet.
+- **The package builds for Windows today**, with no error or warning:
+  - for x86-64 and aarch64, on kama 0.9.675 and on 0.9.523;
+  - the binary imports only system DLLs: KERNEL32, WS2_32, bcrypt, ntdll and the UCRT.
+- **kama's isolates are winpthreads on Windows.** `kama_isolate.h` includes `<pthread.h>` and calls
+  `pthread_create` on every target. mingw-w64 and zig both ship winpthreads, and it is linked statically: there is no
+  `libwinpthread-1.dll` import.
+- **`MBEDTLS_THREADING_PTHREAD` builds on Windows the same way.** I took the `!defined(_WIN32)` guard out of
+  `csrc/ktls_crypto_user_config.h` in a scratch copy. On both compilers the test binary then linked
+  `mbedtls_mutex_lock` over `pthread_mutex_lock`, with no new DLL.
+- **Two isolates may race into `ktls_init`'s first call.** `psa_crypto_init` sets up each subsystem under
+  `mbedtls_threading_psa_globaldata_mutex`. So the atomic flag only skips repeated work, as it does on POSIX.
+- **Entropy is already linked.** kama's driver links `bcrypt` for every Windows target, because std::random's
+  entropy is `BCryptGenRandom`. 0.9.523 does too: the binaries import `bcrypt.dll`. Mbed TLS's builtin source
+  finds `BCryptGenRandom` there.
+- **CI can pin the floor on Windows.** The kama v0.9.523 release has `kama-windows-x64-v0.9.523.tar.gz`, and a
+  `-bundled` one with zig. `install.ps1` installs either from `$env:KAMA_VERSION`.
+
+**So the plan written on 2026-10-18 changes:**
+- **Threading: `MBEDTLS_THREADING_PTHREAD` on every target.** Drop the `_WIN32` guard and its comment.
+  - The `MBEDTLS_THREADING_ALT` layer is not needed. That was a `threading_alt.h` over `SRWLOCK` and
+    `CONDITION_VARIABLE`, `mbedtls_threading_set_alt()` before `psa_crypto_init`, and `ktls_init` as an
+    `InitOnceExecuteOnce`.
+  - It was planned against a winpthreads DLL and a toolchain without winpthreads, and kama has neither.
+  - The configuration's lock from phase 6, and Mbed TLS's own locks, then follow with no code change.
+- **Entropy: nothing to add.** The old plan's `bcrypt` link entry is already the driver's. Also, 0.9.523 refuses a
+  `link` entry with `compileFor`: it takes strings only, and the object form arrived in 0.9.609.
+- **`trustSystem()` reads the system store.** It reads a CA bundle file today, and Windows has none. So on Windows
+  it reads the store through crypt32: `CertOpenSystemStoreW(0, L"ROOT")`, adding each certificate's
+  `pbCertEncoded` with `mbedtls_x509_crt_parse_der`. `SSL_CERT_FILE` stays the override. Windows downloads some
+  roots only when its own chain builder first needs one (automatic root update), so the ROOT store can lack a root
+  the system would trust. The API comment says so, and points to `SSL_CERT_FILE`.
+
+  **For the maintainer to decide before code:**
+  - **How crypt32 is linked**, since 0.9.523 cannot gate a `link` entry to Windows. Either:
+    - raise the `"kama"` floor to 0.9.609 or later and declare `{ "name": "crypt32", "compileFor": ["OS_WINDOWS"] }`.
+      The release named as the floor must have its assets.
+    - or load it at run time with `LoadLibraryExW(L"crypt32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)` and
+      `GetProcAddress`, which keeps 0.9.523.
+
+    A `select.TARGET.WINDOWS.link` entry passes 0.9.523's check. It is unverified whether it reaches a native
+    Windows build, which is the `HOST` target there, or a consumer's build.
+  - **Which stores, and which certificates in them.** Whether to read the "CA" store as well as "ROOT", and whether
+    to keep only certificates trusted for serverAuth, as CPython's `ssl.create_default_context()` does on Windows.
+- **The gate.** Add a `windows-latest` leg to `.github/workflows/ci.yml`:
+  - `install.ps1` with `KAMA_VERSION: v0.9.523`;
+  - OpenSSL 3 for `tools/gen-certs.sh`;
+  - `tools/test.sh` under bash.
+
+  Watch for two things on the first run, neither seen yet:
+  - **Line endings.** A checkout with CRLF breaks `tools/*.sh` under bash. A `.gitattributes` with
+    `*.sh text eol=lf` settles it.
+  - **The certificate path.** Check the `KTLS_TEST_CERTS` path the tests get under Git Bash.
+
+  Then remove "Windows is not in the matrix" from the workflow comment, and update the README's platform line.
 
 ### WebAssembly (phase 8)
 
