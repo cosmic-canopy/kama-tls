@@ -6,7 +6,9 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
-Version 0.1.5. Needs **kama ≥ 0.9.523**.
+## [0.1.5] — 2026-10-19
+
+Needs **kama ≥ 0.9.523**.
 
 ### Fixed
 - **A configuration's setters no longer race each other or a session being made from it.** `share()` gives another
