@@ -34,11 +34,12 @@ jobs:
       # Pinned rather than `latest`, so a compiler release cannot turn this repository red without a commit.
       # Two pins, each raised deliberately, in the same commit that raises the floor it mirrors: the package's
       # "kama" floor (kama.json), which builds the library alone, and the tests' (tests/kama.json), which runs
-      # the gate. The second install is the `kama` on the PATH.
+      # the gate. install.sh makes only a first install the default, so the tests' is named the default
+      # explicitly: it is the `kama` on the PATH.
       - name: Install kama
         run: |
           curl -fsSL https://kama-lang.org/install.sh | KAMA_VERSION=v0.9.523 sh
-          curl -fsSL https://kama-lang.org/install.sh | KAMA_VERSION=v0.9.690 sh
+          curl -fsSL https://kama-lang.org/install.sh | KAMA_SET_DEFAULT=1 KAMA_VERSION=v0.9.690 sh
           echo "$HOME/.kama/bin" >> "$GITHUB_PATH"
 
       - name: The package's floor
