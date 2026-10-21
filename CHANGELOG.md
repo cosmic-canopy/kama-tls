@@ -6,7 +6,9 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
-Version 0.1.6. Needs **kama ≥ 0.9.523**; its tests need 0.9.690.
+## [0.1.6] — 2026-10-20
+
+Needs **kama ≥ 0.9.523**; its tests need 0.9.690.
 
 ### Fixed
 - **Builds with kama 0.9.707**, in development, which refuses code after a `while (true)` that has no `break` and
