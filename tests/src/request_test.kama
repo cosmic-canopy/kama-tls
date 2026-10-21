@@ -2,7 +2,7 @@
 // `certificateRequested()`, which libpq's sslcertmode=require needs), and the name a client sent as SNI (a
 // server's `requestedServerName()`). Under TLS 1.3 and 1.2, since each version asks in a message of its own.
 import { tls::TlsConfig, tls::TlsError, tls::Verify, tls::TlsVersion,
-         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::check, tls_tests::fail, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
          tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome };
 export { requestTests };
 
@@ -10,7 +10,7 @@ export { requestTests };
 fn TlsConfig server(int32 policy) {
     string crt = "server.crt"; string key = "server.key";
     Result<TlsConfig, TlsError> made = serverConfig(certName: crt, keyName: key);
-    TlsConfig s = match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "server config"); return server(policy: policy); } };
+    TlsConfig s = match (give made) { case Ok(value: x): give x; case Err(error: e): fail::<TlsConfig>(msg: "server config"); };
     if (policy == 1) { Result<Unit, TlsError> r = s.requestClientCertificate(); }
     if (policy == 2) {
         Result<Unit, TlsError> v = s.verify(mode: Verify::Chain);
@@ -22,7 +22,7 @@ fn TlsConfig server(int32 policy) {
 fn TlsConfig client(bool withCertificate, bool tls12) {
     string ca = "ca.crt";
     Result<TlsConfig, TlsError> made = clientConfig(mode: Verify::Chain, caName: ca);
-    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "client config"); return client(withCertificate: withCertificate, tls12: tls12); } };
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): fail::<TlsConfig>(msg: "client config"); };
     if (withCertificate) {
         string crt = certPath(name: "client.crt");
         string key = certPath(name: "client.key");

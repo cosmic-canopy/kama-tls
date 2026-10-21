@@ -3,7 +3,7 @@
 // hash for each signature hash, against openssl's own (tools/gen-certs.sh writes it beside each certificate).
 import { core::println, std::io::IoError, std::collections::DynamicArray, std::collections::FixedArray, std::fs::readText,
          tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
-         tls_tests::check, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig,
+         tls_tests::check, tls_tests::fail, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig,
          tls_tests::connect, tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session,
          tls_tests::Outcome };
 export { wordsTests, hex, keyPassword };
@@ -25,7 +25,7 @@ fn string hex(const ref DynamicArray<uint8> bytes) {
 }
 
 fn TlsConfig must(Result<TlsConfig, TlsError> made, const ref string what) {
-    return match (give made) { case Ok(value: c): give c; case Err(error: e): { string m = e.message(); panic(msg: "${what}: ${m}"); return must(made: TlsConfig.client(), what: what); } };
+    return match (give made) { case Ok(value: c): give c; case Err(error: e): { string m = e.message(); := fail::<TlsConfig>(msg: "${what}: ${m}"); } };
 }
 
 // Two reasons at once (an expired certificate from a CA the client does not trust): joined with "; ", each

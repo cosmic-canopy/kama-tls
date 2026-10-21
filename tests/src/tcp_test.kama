@@ -16,8 +16,9 @@ type resource ServerJob implements Sendable {
     public ctor make(TcpListener listener, TlsConfig config, Sender<int32> verdict) {
         this.listener = give listener; this.config = give config; this.verdict = give verdict;
     }
-    // Accept one client, answer "ping" with "pong", close in order. Reports 0, or the step that failed.
-    public fn void run() { int32 v = this.serve(); this.verdict.send(item: v); }
+    // Accept one client, answer "ping" with "pong", close in order. Reports 0, or the step that failed; a verdict
+    // that cannot be delivered fails the test on the receiving side, which then hears nothing.
+    public fn void run() { int32 v = this.serve(); _ = this.verdict.send(item: v); }
     fn int32 serve() {
         Result<TcpStream, IoError> a = this.listener.accept();
         TcpStream sock = match (give a) { case Ok(value: s): give s; case Err(error: e): { return 1; } };

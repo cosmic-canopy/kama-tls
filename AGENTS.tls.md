@@ -4,9 +4,10 @@ The two generated files carry the general rules: `AGENTS.md` is the language, `A
 a publishable library needs. Both are written by `kama agents install` and are **not** hand-edited. This file
 is the project-specific third, and it is the one to edit.
 
-**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.523**, declared as `"kama"`
-in every manifest here. A registry version is permanent: a change ships as a new version, and only on the
-maintainer's word.
+**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.523** (`"kama"` in `kama.json`),
+and its tests need **0.9.690** (`tests/kama.json`). No test program builds on both, because 0.9.690's `main`
+returns `uint8`. A registry version is permanent: a change ships as a new version, and only on the maintainer's
+word.
 
 - **Name no project this package does not depend on.** Code, comments, docs, the CHANGELOG and commit messages
   name its dependencies (kama and its std, Mbed TLS) and the standards and reference implementations a behavior
@@ -85,6 +86,12 @@ maintainer's word.
   `cannot resolve module 'std::fs'`. The Linux aarch64 leg is the same script inside `localhost/kama-dev`
   (podman), with `../cstar/out/Linux-aarch64/kama` copied to `/k/out/L/kama` and `/k/lib` and `/k/include`
   linked to cstar's.
+- **The package's floor is checked without the tests:** `kama check kama.json` and `kama build kama.json -o …`
+  (a library builds to an archive, so every C source compiles) with 0.9.523, as CI does.
+- **Code builds on every compiler from the floor to the dev one.** Newer compilers keep getting stricter:
+  - no statement after a `while (true)` without `break`, or after a `panic`;
+  - a test's "unwrap or stop" arm is `fail::<T>(msg:)` from `tests/src/main.kama`, because 0.9.690 wants a
+    `return` after a `panic` in a value-producing arm, and later compilers refuse it as unreachable.
 - **Test certificates are generated** into `out/test-certs` by `tools/gen-certs.sh` and never tracked.
   `kama publish` refuses a tracked `*.key` or `*.pem`, and so does the registry.
 - **A gap goes in a `KAMA_GAPS.md` here the moment it is hit**, reduced to a repro and run on the named

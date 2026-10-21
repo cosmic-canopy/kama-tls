@@ -1,8 +1,8 @@
 #!/bin/sh
 # tsan.sh — build the package's tests under ThreadSanitizer and run them once. `kama` is taken from $KAMA or the
-# PATH, and must be 0.9.610 or later: that is the first release whose `select` values carry build flags. So the
-# TSAN build type lives in a manifest written here, beside a copy of tests/src, and not in tests/kama.json, whose
-# floor is the package's. TSan exits non-zero after a report, and so does this script. Not part of the gate.
+# PATH, and must meet the tests' floor (tests/kama.json); `select` values carry build flags from 0.9.610 on. The
+# TSAN build type lives in a manifest written here, beside a copy of tests/src, rather than in tests/kama.json.
+# TSan exits non-zero after a report, and so does this script. Not part of the gate.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KAMA=${KAMA:-kama}
@@ -16,7 +16,7 @@ cat > "$tmp/kama.json" <<EOF
   "name": "tls_tests",
   "version": "0.1.0",
   "kind": "executable",
-  "kama": ">=0.9.610",
+  "kama": ">=0.9.690",
   "entry": "src/main.kama",
   "dependencies": { "@kama/tls": { "path": "$ROOT" } },
   "modules": { ".": { "visibility": "internal" } },

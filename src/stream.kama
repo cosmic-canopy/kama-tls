@@ -143,7 +143,6 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
                 }
             };
         }
-        return Result::Ok(value: Progress::Done);
     }
 
     // `Reader`: decrypted bytes into `into`. 0 means the peer closed the session in order (close_notify).
@@ -167,7 +166,6 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
                 case Err(error: e): { return Result::Err(error: e); }
             };
         }
-        return Result::Ok(value: 0);
     }
 
     // `Writer`: encrypt and send. Answers how many plaintext bytes were taken — at most one record's worth,
@@ -426,7 +424,6 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
             }
             cap = n;
         }
-        return DynamicArray.empty();
     }
 
     unsafe ~TlsStream() { if (this.session != null) { ktls_session_free(s: this.session); } }

@@ -3,12 +3,16 @@
 // in its own isolate — so they run anywhere `tools/test.sh` runs, debug and release. A failing case prints
 // its name, so the log says WHICH, not just that.
 import { core::println, tls::TlsError, tls::ready, tls::version, tls_tests::handshakeTests, tls_tests::streamTests, tls_tests::tcpTests, tls_tests::wordsTests, tls_tests::certificateTests, tls_tests::revocationTests, tls_tests::requestTests, tls_tests::identityTests, tls_tests::identitiesTests, tls_tests::keylogTests, tls_tests::sharedTests };
-export { check };
+export { check, fail };
 
 fn int32 check(bool ok, string what) {
     if (!ok) { println(s: "  FAIL ${what}"); return 1; }
     return 0;
 }
+
+// A setup step that cannot go on (a broken fixture, not a broken package): stops the run with `msg`. It stands where
+// a `match` arm must produce a `T`, so the arm needs no value of its own after the panic.
+fn T fail<T>(string msg) { panic(msg: msg); }
 
 // The vendored library starts, and is the release tools/vendor-mbedtls.sh pins (its VERSION).
 fn int32 vendoringTests() {
@@ -24,7 +28,7 @@ fn int32 vendoringTests() {
     return f;
 }
 
-fn int32 main() {
+fn uint8 main() {
     int32 failed = 0;
     failed = failed + vendoringTests();
     failed = failed + handshakeTests();

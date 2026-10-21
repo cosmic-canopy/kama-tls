@@ -5,7 +5,7 @@ import { core::println, core::env, std::io::IoError, std::io::writeAll, std::col
          std::collections::FixedArray, std::collections::ConstView, std::fs::readText, std::encoding::base64::decode as b64decode,
          std::encoding::base64::DecodeError, std::digest::sha256::sha256,
          tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
-         tls_tests::check, tls_tests::PipeEnd, tls_tests::pipePair };
+         tls_tests::check, tls_tests::fail, tls_tests::PipeEnd, tls_tests::pipePair };
 export { handshakeTests, certPath, serverConfig, clientConfig, connect, drive, completed, describe, carries, Session, Outcome,
          BADCERT_CN_MISMATCH };
 
@@ -18,7 +18,7 @@ type enum Outcome { Both, ClientFailed(TlsError error), ServerFailed(TlsError er
 
 fn string certPath(const ref string name) {
     Optional<string> dir = env(name: "KTLS_TEST_CERTS");
-    string d = match (give dir) { case Some(value: v): give v; case None: { panic(msg: "KTLS_TEST_CERTS is not set — run tools/test.sh"); return ""; } };
+    string d = match (give dir) { case Some(value: v): give v; case None: fail::<string>(msg: "KTLS_TEST_CERTS is not set — run tools/test.sh"); };
     string slash = d.concat(other: "/");
     return slash.concat(other: name);
 }
@@ -121,8 +121,8 @@ fn Result<Session, TlsError> connect(const ref TlsConfig client, const ref TlsCo
     DynamicArray<PipeEnd> ends = pipePair();
     Optional<PipeEnd> sb = ends.pop();
     Optional<PipeEnd> ca = ends.pop();
-    PipeEnd b = match (give sb) { case Some(value: x): give x; case None: { panic(msg: "pipe"); return Result::Err(error: TlsError::Closed); } };
-    PipeEnd a = match (give ca) { case Some(value: x): give x; case None: { panic(msg: "pipe"); return Result::Err(error: TlsError::Closed); } };
+    PipeEnd b = match (give sb) { case Some(value: x): give x; case None: fail::<PipeEnd>(msg: "pipe"); };
+    PipeEnd a = match (give ca) { case Some(value: x): give x; case None: fail::<PipeEnd>(msg: "pipe"); };
     Result<TlsStream<PipeEnd>, TlsError> cs = TlsStream::<PipeEnd>.client(inner: give a, config: client, serverName: name);
     TlsStream<PipeEnd> c = match (give cs) { case Ok(value: x): give x; case Err(error: e): { return Result::Err(error: give e); } };
     Result<TlsStream<PipeEnd>, TlsError> ss = TlsStream::<PipeEnd>.server(inner: give b, config: server);
@@ -134,11 +134,11 @@ fn Result<Session, TlsError> connect(const ref TlsConfig client, const ref TlsCo
 // Answers the outcome, or panics on a setup failure (a broken fixture, not a broken package).
 fn Outcome attempt(Verify mode, const ref string ca, const ref string certName, const ref string keyName, const ref string name) {
     Result<TlsConfig, TlsError> cc = clientConfig(mode: mode, caName: ca);
-    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "client config: ${m}"); return Outcome::Stalled; } };
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<TlsConfig>(msg: "client config: ${m}"); } };
     Result<TlsConfig, TlsError> sc = serverConfig(certName: certName, keyName: keyName);
-    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "server config: ${m}"); return Outcome::Stalled; } };
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<TlsConfig>(msg: "server config: ${m}"); } };
     Result<Session, TlsError> made = connect(client: client, server: server, name: name);
-    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "session: ${m}"); return Outcome::Stalled; } };
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<Session>(msg: "session: ${m}"); } };
     return drive(c: pair.c(), s: pair.s());
 }
 

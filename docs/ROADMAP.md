@@ -9,9 +9,10 @@ client certificate, a step-wise identity with a pair check, and key logging.
 Published on the official registry: 0.1.0 (2026-10-02); 0.1.1 (2026-10-03), what the registry shows and searches, so
 it needs kama 0.9.523; 0.1.2 (2026-10-13), the RFC 9266 tls-exporter channel binding (phase 4); 0.1.3 (2026-10-18),
 no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Sendable`; 0.1.4 (2026-10-18), a server
-holds several identities and chooses one per handshake by SNI (phase 5). 0.1.5 fixes a race on shared configurations
-(phase 6). It was pushed on 2026-10-19 with CI green on kama 0.9.523, and it waits for the registry. Once the
-registry has published it, the CHANGELOG heading takes the date, as `f56b16e` did for 0.1.4.
+holds several identities and chooses one per handshake by SNI (phase 5); 0.1.5 (2026-10-19), a race on shared
+configurations fixed (phase 6). 0.1.6 builds on kama 0.9.690 and on the 0.9.707 in development, and its tests need
+0.9.690; the package's floor stays 0.9.523. It waits for the registry. Once the registry has published it, the
+CHANGELOG heading takes the date, as `cac8a2e` did for 0.1.5.
 
 **Next: every platform kama builds for** ([Platforms](#platforms)), starting with Windows (phase 7). Its section was
 checked against cross builds on 2026-10-19 and has two questions for the maintainer. After the platforms comes

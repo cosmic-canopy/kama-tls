@@ -3,7 +3,7 @@
 // OpenSSL hashed name); the untrusted CA issues other-ca.crl.
 import { std::io::IoError, std::collections::DynamicArray, std::fs::readText,
          tls::TlsConfig, tls::TlsError, tls::Verify, tls::Revocation, tls::BADCERT_NO_CRL,
-         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::check, tls_tests::fail, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
          tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome };
 export { revocationTests };
 
@@ -39,16 +39,16 @@ fn Outcome attempt(const ref string certName, const ref string keyName, const re
     string ca = "ca.crt";
     string localhost = "localhost";
     Result<TlsConfig, TlsError> cc = clientConfig(mode: Verify::Full, caName: ca);
-    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "client config"); return Outcome::Stalled; } };
+    TlsConfig client = match (give cc) { case Ok(value: x): give x; case Err(error: e): fail::<TlsConfig>(msg: "client config"); };
     foreach (string source in sources) {
         Result<Unit, TlsError> loaded = load(c: client, source: source);
-        match (give loaded) { case Ok(value: u): { } case Err(error: e): { string m = e.message(); panic(msg: "load ${source}: ${m}"); return Outcome::Stalled; } };
+        match (give loaded) { case Ok(value: u): { } case Err(error: e): { string m = e.message(); panic(msg: "load ${source}: ${m}"); } };
     }
     Result<Unit, TlsError> set = client.revocation(mode: mode);
     Result<TlsConfig, TlsError> sc = serverConfig(certName: certName, keyName: keyName);
-    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "server config"); return Outcome::Stalled; } };
+    TlsConfig server = match (give sc) { case Ok(value: x): give x; case Err(error: e): fail::<TlsConfig>(msg: "server config"); };
     Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
-    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "session"); return Outcome::Stalled; } };
+    Session pair = match (give made) { case Ok(value: x): give x; case Err(error: e): fail::<Session>(msg: "session"); };
     return drive(c: pair.c(), s: pair.s());
 }
 

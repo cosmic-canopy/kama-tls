@@ -38,10 +38,12 @@ type resource SetterJob implements Sendable {
     TlsConfig config;
     Sender<int32> report;
     public ctor make(TlsConfig config, Sender<int32> report) { this.config = give config; this.report = give report; }
+    // The receiver lives until the verdict is in, so neither send can come back undelivered; if one did, the
+    // other isolate would hear nothing and fail the test there.
     public fn void run() {
-        this.report.send(item: STARTED);
+        _ = this.report.send(item: STARTED);
         int32 v = this.rounds();
-        this.report.send(item: v);
+        _ = this.report.send(item: v);
     }
     // Every setter once a round: the versions, the verify mode, the CRL rule, the trust chain and the CRLs, and in
     // the loading rounds an identity and an ALPN name. None of them changes what a handshake does: the server

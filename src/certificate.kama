@@ -107,7 +107,6 @@ type resource Certificate implements Sendable {
             }
             cap = n;
         }
-        return DynamicArray.empty();
     }
 
     unsafe ~Certificate() { if (this.handle != null) { ktls_cert_free(c: this.handle); } }

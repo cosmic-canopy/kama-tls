@@ -5,7 +5,7 @@ import { core::println, std::io::IoError, std::io::IoErrorKind, std::io::writeAl
          std::encoding::base64::decode as b64decode, std::encoding::base64::DecodeError,
          std::digest::sha256::sha256,
          tls::TlsConfig, tls::TlsStream, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
-         tls_tests::check, tls_tests::BADCERT_CN_MISMATCH, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig,
+         tls_tests::check, tls_tests::fail, tls_tests::BADCERT_CN_MISMATCH, tls_tests::PipeEnd, tls_tests::certPath, tls_tests::serverConfig,
          tls_tests::clientConfig, tls_tests::connect, tls_tests::drive, tls_tests::completed,
          tls_tests::describe, tls_tests::carries, tls_tests::Session, tls_tests::Outcome };
 export { streamTests, pemBody, sameBytes };
@@ -26,13 +26,13 @@ fn Setup ready(ref TlsConfig client, ref TlsConfig server) {
 fn TlsConfig mustClient() {
     string ca = "ca.crt";
     Result<TlsConfig, TlsError> c = clientConfig(mode: Verify::Full, caName: ca);
-    return match (give c) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "client config: ${m}"); return mustClient(); } };
+    return match (give c) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<TlsConfig>(msg: "client config: ${m}"); } };
 }
 
 fn TlsConfig mustServer() {
     string crt = "server.crt"; string key = "server.key";
     Result<TlsConfig, TlsError> s = serverConfig(certName: crt, keyName: key);
-    return match (give s) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); panic(msg: "server config: ${m}"); return mustServer(); } };
+    return match (give s) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<TlsConfig>(msg: "server config: ${m}"); } };
 }
 
 fn int32 versionCode(TlsVersion v) { return match (v) { case Tls12: 12; case Tls13: 13; }; }
@@ -277,7 +277,7 @@ fn int32 failureTests() {
 // The DER inside a PEM file, decoded here rather than by the code under test.
 fn DynamicArray<uint8> pemBody(const ref string path) {
     Result<string, IoError> text = readText(path: path);
-    string pem = match (give text) { case Ok(value: t): give t; case Err(error: e): { panic(msg: "read pem"); return DynamicArray.empty(); } };
+    string pem = match (give text) { case Ok(value: t): give t; case Err(error: e): fail::<string>(msg: "read pem"); };
     string b64 = "";
     bool inside = false;
     foreach (string line in pem.split(sep: "\n")) {
@@ -286,7 +286,7 @@ fn DynamicArray<uint8> pemBody(const ref string path) {
         else if (inside) { b64 = b64.concat(other: line.trim()); }
     }
     Result<DynamicArray<uint8>, DecodeError> der = b64decode(text: b64);
-    return match (give der) { case Ok(value: b): give b; case Err(error: e): { panic(msg: "base64"); return DynamicArray.empty(); } };
+    return match (give der) { case Ok(value: b): give b; case Err(error: e): fail::<DynamicArray<uint8>>(msg: "base64"); };
 }
 
 fn bool sameBytes(ConstView<uint8> a, ConstView<uint8> b) {

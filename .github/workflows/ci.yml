@@ -4,7 +4,7 @@
 # AND release. Mbed TLS is vendored and compiled through `csources`, so nothing is installed on the runner
 # for the package itself. The test PKI needs OpenSSL 3 (tools/gen-certs.sh says why), which the Linux image
 # has and macOS has through Homebrew rather than as /usr/bin/openssl.
-# Windows is not in the matrix; the package has never been built there.
+# Windows is not in the matrix yet: docs/ROADMAP.md, phase 7.
 
 name: ci
 
@@ -32,13 +32,19 @@ jobs:
       - uses: actions/checkout@v5
 
       # Pinned rather than `latest`, so a compiler release cannot turn this repository red without a commit.
-      # Raise it deliberately, in the same commit that raises the manifests' "kama" floor.
+      # Two pins, each raised deliberately, in the same commit that raises the floor it mirrors: the package's
+      # "kama" floor (kama.json), which builds the library alone, and the tests' (tests/kama.json), which runs
+      # the gate. The second install is the `kama` on the PATH.
       - name: Install kama
-        env:
-          KAMA_VERSION: v0.9.523
         run: |
-          curl -fsSL https://kama-lang.org/install.sh | sh
+          curl -fsSL https://kama-lang.org/install.sh | KAMA_VERSION=v0.9.523 sh
+          curl -fsSL https://kama-lang.org/install.sh | KAMA_VERSION=v0.9.690 sh
           echo "$HOME/.kama/bin" >> "$GITHUB_PATH"
+
+      - name: The package's floor
+        run: |
+          "$HOME/.kama/versions/v0.9.523/bin/kama" check kama.json
+          "$HOME/.kama/versions/v0.9.523/bin/kama" build kama.json -o "$RUNNER_TEMP/tls-floor"
 
       - name: OpenSSL 3 for the test PKI
         if: runner.os == 'macOS'

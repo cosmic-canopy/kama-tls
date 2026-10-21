@@ -4,7 +4,7 @@
 // compares the certificate the client was served with the file's own DER.
 import { std::io::IoError, std::collections::DynamicArray, std::fs::readFile,
          tls::TlsConfig, tls::TlsError, tls::Verify, tls::TlsVersion,
-         tls_tests::check, tls_tests::certPath, tls_tests::clientConfig, tls_tests::connect, tls_tests::drive,
+         tls_tests::check, tls_tests::fail, tls_tests::certPath, tls_tests::clientConfig, tls_tests::connect, tls_tests::drive,
          tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome, tls_tests::pemBody,
          tls_tests::sameBytes, tls_tests::codeOf };
 export { identitiesTests };
@@ -19,7 +19,7 @@ fn int32 add(ref TlsConfig c, const ref string name) {
 
 fn DynamicArray<uint8> bytesOf(const ref string name) {
     Result<DynamicArray<uint8>, IoError> read = readFile(path: certPath(name: name));
-    return match (give read) { case Ok(value: b): give b; case Err(error: e): { panic(msg: "read fixture"); return DynamicArray.empty(); } };
+    return match (give read) { case Ok(value: b): give b; case Err(error: e): fail::<DynamicArray<uint8>>(msg: "read fixture"); };
 }
 
 // A client verifying with `mode` asks `server` for `name`: the handshake completes, and the certificate served is

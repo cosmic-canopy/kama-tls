@@ -82,14 +82,14 @@ type enum TlsError implements Error, Sendable {
 // received"). An initial capital is lowered only before a lower-case letter, so an acronym stays as it is.
 fn string bare(const ref string text) {
     string body = copy text;
-    Optional<usize> dash = text.find(substring: " - ");
-    match (dash) {
-        case Some(value: at): {
-            isize from = cast<isize>(at) + 3;
-            if (at <= 12) { body = text.substring(start: from, end: text.length()); }
-        }
-        case None: { }
-    };
+    // The tag ends at the first " - ", when that comes within the first 12 bytes.
+    isize at = 0;
+    isize dash = -1;
+    while (dash < 0 && at <= 12 && at + 3 <= text.length()) {
+        if (text[at] == 32ui8 && text[at + 1] == 45ui8 && text[at + 2] == 32ui8) { dash = at; }
+        at = at + 1;
+    }
+    if (dash >= 0) { body = text.substring(start: dash + 3, end: text.length()); }
     if (body.length() < 2) { return body; }
     uint8 first = body[0];
     uint8 second = body[1];

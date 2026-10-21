@@ -4,14 +4,14 @@
 import { std::io::IoError, std::collections::DynamicArray, std::collections::FixedArray, std::fs::readFile,
          std::io::writeAll,
          tls::TlsConfig, tls::TlsError, tls::Verify,
-         tls_tests::check, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
+         tls_tests::check, tls_tests::fail, tls_tests::certPath, tls_tests::serverConfig, tls_tests::clientConfig, tls_tests::connect,
          tls_tests::drive, tls_tests::completed, tls_tests::describe, tls_tests::Session, tls_tests::Outcome,
          tls_tests::keyPassword };
 export { identityTests, codeOf };
 
 fn DynamicArray<uint8> bytesOf(const ref string name) {
     Result<DynamicArray<uint8>, IoError> read = readFile(path: certPath(name: name));
-    return match (give read) { case Ok(value: b): give b; case Err(error: e): { panic(msg: "read fixture"); return DynamicArray.empty(); } };
+    return match (give read) { case Ok(value: b): give b; case Err(error: e): fail::<DynamicArray<uint8>>(msg: "read fixture"); };
 }
 
 fn int32 codeOf(Result<Unit, TlsError> r) {
@@ -35,7 +35,7 @@ fn bool acceptedBy(ref TlsConfig client) {
 fn TlsConfig freshClient() {
     string ca = "ca.crt";
     Result<TlsConfig, TlsError> made = clientConfig(mode: Verify::Full, caName: ca);
-    return match (give made) { case Ok(value: x): give x; case Err(error: e): { panic(msg: "client config"); return freshClient(); } };
+    return match (give made) { case Ok(value: x): give x; case Err(error: e): fail::<TlsConfig>(msg: "client config"); };
 }
 
 fn int32 stepTests() {
