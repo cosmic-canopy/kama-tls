@@ -10,6 +10,7 @@
 #include "ktls.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,6 +30,14 @@
 #include <psa/crypto.h>
 
 #include "ssl_misc.h"
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <wincrypt.h>
+#endif
 
 /* tlsExporter() (RFC 9266) is mbedtls_ssl_export_keying_material: a configuration without it has no binding. */
 #if !defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT)
@@ -246,6 +255,86 @@ int32_t ktls_config_verify(ktls_config *c, int32_t mode)
     return rc != 0 ? rc : ktls_change_end(c, ktls_config_verify_locked(c, mode));
 }
 
+/* Mbed TLS's file loaders open a path with fopen, which on Windows reads it in the ANSI code page, so a UTF-8 path
+   that is not ASCII names no file there. These read a file as mbedtls_pk_load_file does (no stdio buffer, a NUL
+   appended and counted when the data looks like PEM, the bytes wiped before they are freed) and hand the bytes to
+   the parser Mbed TLS's own file loader would, so every answer, the FILE_IO error included, stays the same. */
+static FILE *ktls_fopen(const char *path)
+{
+#if defined(_WIN32)
+    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (len <= 0) return NULL;
+    wchar_t *wide = malloc((size_t)len * sizeof *wide);
+    if (wide == NULL) return NULL;
+    FILE *f = NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, len) == len) f = _wfopen(wide, L"rb");
+    free(wide);
+    return f;
+#else
+    return fopen(path, "rb");
+#endif
+}
+
+static int ktls_load_file(const char *path, unsigned char **buf, size_t *n)
+{
+    FILE *f = ktls_fopen(path);
+    if (f == NULL) return MBEDTLS_ERR_PK_FILE_IO_ERROR;
+    setbuf(f, NULL);   /* a key must not linger in a stdio buffer, which cannot be wiped */
+    long size = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return MBEDTLS_ERR_PK_FILE_IO_ERROR; }
+    *n = (size_t)size;
+    if ((*buf = calloc(1, *n + 1)) == NULL) { fclose(f); return MBEDTLS_ERR_PK_ALLOC_FAILED; }
+    if (fread(*buf, 1, *n, f) != *n) {
+        fclose(f);
+        mbedtls_platform_zeroize(*buf, *n);
+        free(*buf);
+        return MBEDTLS_ERR_PK_FILE_IO_ERROR;
+    }
+    fclose(f);
+    (*buf)[*n] = '\0';
+    if (strstr((const char *)*buf, "-----BEGIN ") != NULL) ++*n;
+    return 0;
+}
+
+static void ktls_unload_file(unsigned char *buf, size_t n)
+{
+    mbedtls_platform_zeroize(buf, n);
+    free(buf);
+}
+
+static int ktls_crt_parse_file(mbedtls_x509_crt *chain, const char *path)
+{
+    unsigned char *buf;
+    size_t n;
+    int rc = ktls_load_file(path, &buf, &n);
+    if (rc != 0) return rc;
+    rc = mbedtls_x509_crt_parse(chain, buf, n);
+    ktls_unload_file(buf, n);
+    return rc;
+}
+
+static int ktls_crl_parse_file(mbedtls_x509_crl *chain, const char *path)
+{
+    unsigned char *buf;
+    size_t n;
+    int rc = ktls_load_file(path, &buf, &n);
+    if (rc != 0) return rc;
+    rc = mbedtls_x509_crl_parse(chain, buf, n);
+    ktls_unload_file(buf, n);
+    return rc;
+}
+
+static int ktls_pk_parse_keyfile(mbedtls_pk_context *key, const char *path, const char *password)
+{
+    unsigned char *buf;
+    size_t n;
+    int rc = ktls_load_file(path, &buf, &n);
+    if (rc != 0) return rc;
+    rc = mbedtls_pk_parse_key(key, buf, n, (const unsigned char *)password, password != NULL ? strlen(password) : 0);
+    ktls_unload_file(buf, n);
+    return rc;
+}
+
 static void ktls_config_apply_trust(ktls_config *c)
 {
     mbedtls_ssl_conf_ca_chain(&c->conf, c->trust_loaded ? &c->trust : NULL, c->crl_loaded ? &c->crl : NULL);
@@ -253,7 +342,7 @@ static void ktls_config_apply_trust(ktls_config *c)
 
 static int32_t ktls_config_trust_file_locked(ktls_config *c, const char *path)
 {
-    int rc = mbedtls_x509_crt_parse_file(&c->trust, path);
+    int rc = ktls_crt_parse_file(&c->trust, path);
     if (rc < 0) return rc;
     c->trust_loaded = 1;
     ktls_config_apply_trust(c);
@@ -302,9 +391,80 @@ int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len)
     return rc != 0 ? rc : ktls_change_end(c, ktls_config_trust_pem_locked(c, pem, len));
 }
 
+#if defined(_WIN32)
+/* Windows keeps no CA bundle file, so trustSystem() imports the roots its certificate store trusts, as curl's
+   --ca-native and rustls-native-certs do: the ROOT store (not the CA store, whose intermediates would become trust
+   anchors), each root only when Windows allows it for server authentication, and none the Disallowed store holds.
+
+   An import cannot carry what Windows' own verifier applies beyond the store: a root distrusted only for
+   certificates issued after a date, and a root Windows would download the first time its chain builder needs one
+   (automatic root update), which the ROOT store lacks until then. SSL_CERT_FILE names a bundle instead. */
+int32_t ktls_win_root_kept(const void *cert, void *disallowed)
+{
+    PCCERT_CONTEXT crt = cert;
+    /* The usages are the intersection of the certificate's EKU extension and the EKU property the store gives it.
+       None listed means every use when Windows says CRYPT_E_NOT_FOUND, and no use otherwise: an empty property is
+       how a root is turned off for every purpose. */
+    DWORD size = 0;
+    if (!CertGetEnhancedKeyUsage(crt, 0, NULL, &size)) return 0;
+    CERT_ENHKEY_USAGE *usage = malloc(size);
+    if (usage == NULL) return KTLS_ERR_NOMEM;
+    int32_t kept = 0;
+    SetLastError(0);
+    if (CertGetEnhancedKeyUsage(crt, 0, usage, &size)) {
+        if (usage->cUsageIdentifier == 0) kept = GetLastError() == (DWORD)CRYPT_E_NOT_FOUND;
+        for (DWORD i = 0; i < usage->cUsageIdentifier && !kept; i++) {
+            kept = strcmp(usage->rgpszUsageIdentifier[i], szOID_PKIX_KP_SERVER_AUTH) == 0;
+        }
+    }
+    free(usage);
+    if (kept && disallowed != NULL) {
+        PCCERT_CONTEXT found = CertFindCertificateInStore(disallowed, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0,
+                                                          CERT_FIND_EXISTING, crt, NULL);
+        if (found != NULL) {
+            CertFreeCertificateContext(found);
+            kept = 0;
+        }
+    }
+    return kept;
+}
+
+static int32_t ktls_config_trust_windows_locked(ktls_config *c)
+{
+    HCERTSTORE roots = CertOpenSystemStoreW(0, L"ROOT");
+    HCERTSTORE disallowed = CertOpenSystemStoreW(0, L"Disallowed");
+    int32_t rc = roots != NULL && disallowed != NULL ? 0 : KTLS_ERR_SYSTEM_STORE;
+    int32_t kept = 0, skipped = 0;
+    PCCERT_CONTEXT cert = NULL;
+    while (rc == 0 && (cert = CertEnumCertificatesInStore(roots, cert)) != NULL) {
+        int32_t keep = ktls_win_root_kept(cert, disallowed);
+        if (keep < 0) {
+            rc = keep;
+            CertFreeCertificateContext(cert);
+        } else if (keep) {
+            if (mbedtls_x509_crt_parse_der(&c->trust, cert->pbCertEncoded, cert->cbCertEncoded) == 0) kept++;
+            else skipped++;
+        }
+    }
+    if (disallowed != NULL) CertCloseStore(disallowed, 0);
+    if (roots != NULL) CertCloseStore(roots, 0);
+    if (rc != 0) return rc;
+    if (kept == 0) return KTLS_ERR_SYSTEM_STORE;
+    c->trust_loaded = 1;
+    ktls_config_apply_trust(c);
+    return skipped;
+}
+
+int32_t ktls_config_trust_windows(ktls_config *c)
+{
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_trust_windows_locked(c));
+}
+#endif
+
 static int32_t ktls_config_crl_file_locked(ktls_config *c, const char *path)
 {
-    int rc = mbedtls_x509_crl_parse_file(&c->crl, path);
+    int rc = ktls_crl_parse_file(&c->crl, path);
     if (rc != 0) return rc;
     c->crl_loaded = 1;
     ktls_config_apply_trust(c);
@@ -459,9 +619,9 @@ static int32_t ktls_config_identity_files_locked(ktls_config *c, const char *cer
     if (rc != 0) return rc;
     ktls_identity *id = ktls_identity_new();
     if (id == NULL) return KTLS_ERR_NOMEM;
-    rc = mbedtls_x509_crt_parse_file(&id->cert, cert);
+    rc = ktls_crt_parse_file(&id->cert, cert);
     if (rc > 0) rc = KTLS_ERR_INPUT;
-    if (rc == 0) rc = mbedtls_pk_parse_keyfile(&id->key, key, (password != NULL && password[0] != 0) ? password : NULL);
+    if (rc == 0) rc = ktls_pk_parse_keyfile(&id->key, key, (password != NULL && password[0] != 0) ? password : NULL);
     if (rc == 0 && !ktls_pair_matches(&id->cert.pk, &id->key)) rc = KTLS_ERR_KEY_MISMATCH;
     if (rc == 0) rc = ktls_config_add_identity(c, id);
     if (rc != 0) ktls_identity_free(id);
@@ -1006,6 +1166,7 @@ size_t ktls_error_text(int32_t code, uint8_t *buf, size_t cap)
     static const char notrust[] = "no trust roots to verify the peer against";
     static const char truncated[] = "the connection ended without a TLS close_notify (truncated)";
     static const char mismatch[] = "the private key does not match the certificate";
+    static const char store[] = "the Windows certificate store could not be read, or holds no root trusted for server authentication";
     switch (code) {
         case KTLS_ERR_NOMEM:   return ktls_copy_out(nomem, sizeof nomem - 1, buf, cap);
         case KTLS_ERR_FROZEN:  return ktls_copy_out(frozen, sizeof frozen - 1, buf, cap);
@@ -1013,6 +1174,7 @@ size_t ktls_error_text(int32_t code, uint8_t *buf, size_t cap)
         case KTLS_ERR_NOTRUST: return ktls_copy_out(notrust, sizeof notrust - 1, buf, cap);
         case KTLS_TRUNCATED:   return ktls_copy_out(truncated, sizeof truncated - 1, buf, cap);
         case KTLS_ERR_KEY_MISMATCH: return ktls_copy_out(mismatch, sizeof mismatch - 1, buf, cap);
+        case KTLS_ERR_SYSTEM_STORE: return ktls_copy_out(store, sizeof store - 1, buf, cap);
         default: break;
     }
     const char *known = ktls_known_text(code);

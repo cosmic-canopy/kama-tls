@@ -9,10 +9,10 @@ over TLS unchanged.
 kama pkg add kama.json @kama/tls --version ^0.1.0     # from the official registry, registry.kama-lang.org
 ```
 
-Needs **kama ≥ 0.9.523** — declared as `"kama": ">=0.9.523"` in the manifest, so an older compiler is refused by
-name. (0.1.0 needed 0.9.519; 0.1.1 raised the floor only for the registry's metadata keys.) The package's own tests
-need 0.9.690. Tested, debug and release, on macOS arm64 and Linux aarch64; Windows is not supported yet (see
-[docs/ROADMAP.md](docs/ROADMAP.md)).
+Needs **kama ≥ 0.9.690** — declared as `"kama": ">=0.9.690"` in the manifest, so an older compiler is refused by
+name. (0.1.0 needed 0.9.519; 0.1.1 raised the floor to 0.9.523 for the registry's metadata keys, and 0.1.7 to 0.9.690
+for a library linked on Windows alone.) Tested, debug and release, on macOS arm64, Linux aarch64 and x86-64, and
+Windows x86-64. WebAssembly and bare metal are next ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 ## Using it
 
@@ -31,6 +31,12 @@ Result<TcpStream, IoError> sock = TcpStream.connectHost(host: host, port: 443ui1
 …
 Result<TlsStream<TcpStream>, TlsError> tls = TlsStream::<TcpStream>.client(inner: give s, config: config, serverName: host);
 ```
+
+`trustSystem()` trusts what the operating system does: the bundle `SSL_CERT_FILE` names when it is set, else the
+system's CA bundle on Linux and macOS. On Windows it imports the roots the certificate store allows for server
+authentication, less any in its Disallowed store. Windows also trusts a root it downloads the first time it meets one,
+which no import can see, so a server whose root that machine has never needed may be refused; `SSL_CERT_FILE` then
+names a bundle instead.
 
 A `TlsStream` is a `ReliableStream`, so `writeAll`, `BufReader` and every protocol written against the contract
 work over it. A server is the same with `TlsConfig.server()`, an identity (`identityFiles` / `identityPem`; several,

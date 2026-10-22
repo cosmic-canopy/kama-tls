@@ -3,8 +3,7 @@
 # The whole gate is tools/test.sh: every case is hermetic (in-memory pipes and loopback TCP), built debug
 # AND release. Mbed TLS is vendored and compiled through `csources`, so nothing is installed on the runner
 # for the package itself. The test PKI needs OpenSSL 3 (tools/gen-certs.sh says why), which the Linux image
-# has and macOS has through Homebrew rather than as /usr/bin/openssl.
-# Windows is not in the matrix yet: docs/ROADMAP.md, phase 7.
+# has, macOS has through Homebrew rather than as /usr/bin/openssl, and Windows has in Git Bash.
 
 name: ci
 
@@ -27,25 +26,38 @@ jobs:
         include:
           - { os: ubuntu-latest, name: linux-x64 }
           - { os: macos-14, name: macos-arm64 }
+          - { os: windows-latest, name: windows-x64 }
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash   # Git Bash on Windows
+    env:
+      # Pinned rather than `latest`, so a compiler release cannot turn this repository red without a commit. It is
+      # the package's "kama" floor (kama.json), which the tests share (tests/kama.json), and is raised with it.
+      KAMA_VERSION: v0.9.690
     steps:
       - uses: actions/checkout@v5
 
-      # Pinned rather than `latest`, so a compiler release cannot turn this repository red without a commit.
-      # Two pins, each raised deliberately, in the same commit that raises the floor it mirrors: the package's
-      # "kama" floor (kama.json), which builds the library alone, and the tests' (tests/kama.json), which runs
-      # the gate. install.sh makes only a first install the default, so the tests' is named the default
-      # explicitly: it is the `kama` on the PATH.
       - name: Install kama
+        if: runner.os != 'Windows'
         run: |
-          curl -fsSL https://kama-lang.org/install.sh | KAMA_VERSION=v0.9.523 sh
-          curl -fsSL https://kama-lang.org/install.sh | KAMA_SET_DEFAULT=1 KAMA_VERSION=v0.9.690 sh
+          curl -fsSL https://kama-lang.org/install.sh | sh
           echo "$HOME/.kama/bin" >> "$GITHUB_PATH"
 
-      - name: The package's floor
+      # The release with zig bundled, so the C compiler is part of the pin. install.ps1 would choose the slim one,
+      # because the image has C compilers, and slim kama compiles with whichever `clang` the image puts first on the
+      # PATH. A Windows machine with no toolchain gets this same bundled release.
+      - name: Install kama (Windows, with its bundled zig)
+        if: runner.os == 'Windows'
         run: |
-          "$HOME/.kama/versions/v0.9.523/bin/kama" check kama.json
-          "$HOME/.kama/versions/v0.9.523/bin/kama" build kama.json -o "$RUNNER_TEMP/tls-floor"
+          asset="kama-windows-x64-bundled-$KAMA_VERSION.tar.gz"
+          url="https://github.com/cosmic-canopy/kama/releases/download/$KAMA_VERSION/$asset"
+          curl -fsSLO "$url"
+          want=$(curl -fsSL "$url.sha256" | cut -d' ' -f1)
+          echo "$want *$asset" | sha256sum -c -
+          mkdir -p "$HOME/.kama/$KAMA_VERSION"
+          tar -xzf "$asset" -C "$HOME/.kama/$KAMA_VERSION" --strip-components=1
+          cygpath -w "$HOME/.kama/$KAMA_VERSION/bin" >> "$GITHUB_PATH"
 
       - name: OpenSSL 3 for the test PKI
         if: runner.os == 'macOS'

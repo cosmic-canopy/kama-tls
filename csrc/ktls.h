@@ -28,6 +28,7 @@ size_t ktls_strlen(const uint8_t *s);
 #define KTLS_ERR_NOTRUST (-6)  /* a session that must verify its peer has no trust roots to verify against */
 #define KTLS_TRUNCATED   (-7)  /* the transport ended without close_notify: a truncation, not an orderly end */
 #define KTLS_ERR_KEY_MISMATCH (-8)  /* the private key does not pair with the certificate */
+#define KTLS_ERR_SYSTEM_STORE (-9)  /* Windows: the certificate store could not be read, or holds no usable root */
 
 /* ---- configuration: one per role, shared by every session made from it ---------------------------------
    Reference-counted with an atomic count, so a configuration (and Mbed TLS's ssl_config inside it, which is
@@ -46,6 +47,16 @@ void ktls_config_release(ktls_config *c);               /* frees on the last rel
 int32_t ktls_config_verify(ktls_config *c, int32_t mode);
 int32_t ktls_config_trust_file(ktls_config *c, const char *path);   /* a PEM or DER file of CA certificates */
 int32_t ktls_config_trust_pem(ktls_config *c, const uint8_t *pem, size_t len);
+#if defined(_WIN32)
+/* Windows keeps no CA bundle file: the roots its certificate store trusts for server authentication, which are the
+   ROOT store's less any the Disallowed store holds. KTLS_ERR_SYSTEM_STORE when either store cannot be opened or no
+   root is kept; otherwise, as from ktls_config_trust_file, how many kept roots Mbed TLS could not parse. */
+int32_t ktls_config_trust_windows(ktls_config *c);
+/* Whether that import keeps `cert` (a PCCERT_CONTEXT): 1 when Windows allows it for server authentication and
+   `disallowed` (an HCERTSTORE, or NULL) does not hold it, else 0, or KTLS_ERR_NOMEM. The tests call it on stores
+   they make in memory. */
+int32_t ktls_win_root_kept(const void *cert, void *disallowed);
+#endif
 /* This side's identity, in two steps so a failure says which: the certificate chain (PEM or DER; the first
    certificate is this side's), then the private key (PEM or DER, decrypted with `password` when it has length),
    which must pair with that certificate (KTLS_ERR_KEY_MISMATCH). A client holds one identity. A server may hold

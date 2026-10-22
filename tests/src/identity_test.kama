@@ -1,6 +1,6 @@
 // An identity in two steps (the chain, then the key that pairs with it), each failing on its own; the system
-// trust store with SSL_CERT_FILE given by the caller; and the session state a non-blocking caller needs: key
-// bits, ciphertext still to send, plaintext still to read.
+// trust store with SSL_CERT_FILE given by the caller; files under a path that is not ASCII; and the session state
+// a non-blocking caller needs: key bits, ciphertext still to send, plaintext still to read.
 import { std::io::IoError, std::collections::DynamicArray, std::collections::FixedArray, std::fs::readFile,
          std::io::writeAll,
          tls::TlsConfig, tls::TlsError, tls::Verify,
@@ -146,10 +146,31 @@ fn int32 sessionStateTests() {
     return f;
 }
 
+// Every file loader opens a path that is not ASCII. A path is UTF-8 in kama, and Windows opens one only as UTF-16.
+fn int32 unicodePathTests() {
+    int32 f = 0;
+    string nopw = "";
+    string ca = certPath(name: "ünïcode/ca.crt");
+    string crt = certPath(name: "ünïcode/client.crt");
+    string key = certPath(name: "ünïcode/client.key");
+    string crl = certPath(name: "ünïcode/revoked.crl");
+    TlsConfig c = freshClient();
+    f = f + check(ok: codeOf(r: c.trustFile(path: ca)) == 0, what: "unicode path: trustFile");
+    f = f + check(ok: codeOf(r: c.identityFiles(certificate: crt, key: key, password: nopw)) == 0, what: "unicode path: identityFiles");
+    f = f + check(ok: codeOf(r: c.revocationFile(path: crl)) == 0, what: "unicode path: revocationFile");
+    Result<TlsConfig, TlsError> made = TlsConfig.client();
+    TlsConfig d = match (give made) { case Ok(value: x): give x; case Err(error: e): { return f + check(ok: false, what: "unicode path: client"); } };
+    Result<isize, TlsError> named = d.trustSystemWith(certFile: Optional::Some(value: give ca));
+    bool one = match (give named) { case Ok(value: n): n == 1; case Err(error: e): false; };
+    f = f + check(ok: one, what: "unicode path: SSL_CERT_FILE");
+    return f;
+}
+
 fn int32 identityTests() {
     int32 f = 0;
     f = f + stepTests();
     f = f + systemTests();
+    f = f + unicodePathTests();
     f = f + sessionStateTests();
     return f;
 }

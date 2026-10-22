@@ -4,10 +4,9 @@ The two generated files carry the general rules: `AGENTS.md` is the language, `A
 a publishable library needs. Both are written by `kama agents install` and are **not** hand-edited. This file
 is the project-specific third, and it is the one to edit.
 
-**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package needs **kama ≥ 0.9.523** (`"kama"` in `kama.json`),
-and its tests need **0.9.690** (`tests/kama.json`). No test program builds on both, because 0.9.690's `main`
-returns `uint8`. A registry version is permanent: a change ships as a new version, and only on the maintainer's
-word.
+**Read [docs/ROADMAP.md](docs/ROADMAP.md) first.** The package and its tests need **kama ≥ 0.9.690** (`"kama"` in
+`kama.json` and `tests/kama.json`). A registry version is permanent: a change ships as a new version, and only on the
+maintainer's word.
 
 - **Name no project this package does not depend on.** Code, comments, docs, the CHANGELOG and commit messages
   name its dependencies (kama and its std, Mbed TLS) and the standards and reference implementations a behavior
@@ -31,14 +30,16 @@ word.
   `MBEDTLS_USER_CONFIG_FILE` / `TF_PSA_CRYPTO_USER_CONFIG_FILE` to `csrc/ktls_mbedtls_user_config.h` and
   `csrc/ktls_crypto_user_config.h`. That works because kama 0.9.473 passes each flag as one argument. Each
   `#undef`/`#define` there carries its reason, and a change to the configuration is a change to those
-  two files. Threading is on (isolates are OS threads); DTLS, renegotiation, socket I/O and persistent key
-  storage are off.
+  two files. Threading is on for every target (isolates are OS threads: pthreads, and winpthreads on Windows);
+  DTLS, renegotiation, socket I/O and persistent key storage are off.
 - **The C this package writes is glue only** (`csrc/ktls.c`):
   - a once-guard over `psa_crypto_init`;
   - the memory-BIO session (phase 2);
   - error text into a caller buffer;
   - the RFC 5929 end-point hash and the RFC 9266 tls-exporter value;
   - the SNI callback that chooses among a server's identities (`ktls_sni_seen`);
+  - the file loader behind every file-based setter (`ktls_load_file`), which opens a UTF-8 path as UTF-16 on Windows;
+  - on Windows, the import of the certificate store's roots (`ktls_config_trust_windows`, `ktls_win_root_kept`);
   - a `_Static_assert` per size kama spells as a literal.
 
   Entropy is Mbed TLS's builtin source (getrandom / getentropy / BCryptGenRandom).
@@ -86,8 +87,19 @@ word.
   `cannot resolve module 'std::fs'`. The Linux aarch64 leg is the same script inside `localhost/kama-dev`
   (podman), with `../cstar/out/Linux-aarch64/kama` copied to `/k/out/L/kama` and `/k/lib` and `/k/include`
   linked to cstar's.
-- **The package's floor is checked without the tests:** `kama check kama.json` and `kama build kama.json -o …`
-  (a library builds to an archive, so every C source compiles) with 0.9.523, as CI does.
+- **The Windows leg is the same script under Git Bash**, with msys2's UCRT64 clang first on the PATH:
+  `PATH=/c/msys64/ucrt64/bin:$PATH KAMA=$PWD/../kama/out/UCRT64-x86_64/kama.exe tools/test.sh`.
+  The compiler there is `../kama` built with `make` under msys2 UCRT64. A release works the same way, extracted
+  anywhere. CI's Windows leg uses the release with zig bundled instead, so the compiler is part of the pin.
+  - Git Bash and msys2's bash both rewrite a POSIX path in an environment variable for a Windows program, so
+    `KTLS_TEST_CERTS` arrives as `C:/…` and `tools/test.sh` needs no Windows branch (checked 2026-10-22).
+- **`trustSystem()` on Windows imports the certificate store; it never probes a bundle path.** There
+  `/etc/ssl/cert.pem` is `C:\etc\ssl\cert.pem`, under a drive root where any user may make a directory, so probing
+  it would let anyone on the machine plant a root. `systemRoots` in `src/config.kama` has a `@compileFor` twin per
+  side.
+  - The import's verdict per root is tested on stores made in memory (`tests/csrc/windows_roots.c`), never on the
+    machine's own.
+  - A machine's ROOT store holds only the roots Windows has needed so far: 21 load on a Windows 11 machine.
 - **Code builds on every compiler from the floor to the dev one.** Newer compilers keep getting stricter:
   - no statement after a `while (true)` without `break`, or after a `panic`;
   - a test's "unwrap or stop" arm is `fail::<T>(msg:)` from `tests/src/main.kama`, because 0.9.690 wants a

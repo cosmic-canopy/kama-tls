@@ -6,7 +6,9 @@
 # regenerated whenever the directory is missing; `--force` regenerates them anyway.
 #
 #   ca.crt                       the CA every good certificate chains to
+#   ca.der                       ca.crt as DER, for the Windows store tests, which add a certificate by its encoding
 #   other-ca.crt                 a CA nothing chains to: verification against it must fail
+#   eku-ca.crt / eku-ca.der      a CA whose extendedKeyUsage is codeSigning alone: Windows must not trust it for TLS
 #   server.crt / server.key      RSA-2048, CN=localhost, SAN localhost / 127.0.0.1 / ::1
 #   server-ec.crt / .key         ECDSA P-256, the same names
 #   wronghost.crt / .key         RSA, CN and SAN wrong.example: a hostname check must fail
@@ -28,6 +30,8 @@
 #                                OpenSSL's hashed-directory lookup names it
 #   empty.crl                    the CA's CRL before the revocation: lists nothing
 #   other-ca.crl                 an empty CRL from the untrusted CA, so a CRL set can lack the trusted CA's
+#   ünïcode/                     ca.crt, client.crt, client.key and revoked.crl again, in a directory whose name is not
+#                                ASCII: a file loader must open a UTF-8 path on every platform
 #
 # Every leaf is signed with `openssl ca`, which takes explicit validity dates on every OpenSSL 3 (the newer
 # `x509 -not_before` is 3.4+ only). OPENSSL picks the binary (default `openssl`). It must be OpenSSL, not the
@@ -40,7 +44,7 @@ DIR="$ROOT/out/test-certs"
 OPENSSL=${OPENSSL:-openssl}
 
 # Bump GENERATION when the set of files changes, so an older out/test-certs is regenerated rather than used.
-GENERATION=6
+GENERATION=7
 KEY_PASSWORD='kama-tls test key pw'
 if [ "$(cat "$DIR/.generation" 2>/dev/null)" = "$GENERATION" ] && [ "${1:-}" != "--force" ]; then
     exit 0
@@ -113,13 +117,22 @@ extendedKeyUsage = serverAuth
 basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = clientAuth
+[v3_eku_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+extendedKeyUsage = codeSigning
+subjectKeyIdentifier = hash
 EOF
 sed 's/kama-tls test CA/kama-tls UNTRUSTED CA/' ca.cnf > other-ca.cnf
+sed 's/kama-tls test CA/kama-tls CODE-SIGNING CA/' ca.cnf > eku-ca.cnf
 touch index.txt
 echo 1000 > serial
 
 ossl req -new -x509 -days 3650 -nodes -newkey rsa:2048 -keyout ca.key -out ca.crt -config ca.cnf -extensions v3_ca
 ossl req -new -x509 -days 3650 -nodes -newkey rsa:2048 -keyout other-ca.key -out other-ca.crt -config other-ca.cnf -extensions v3_ca
+ossl req -new -x509 -days 3650 -nodes -newkey rsa:2048 -keyout eku-ca.key -out eku-ca.crt -config eku-ca.cnf -extensions v3_eku_ca
+ossl x509 -in ca.crt -outform DER -out ../ca.der
+ossl x509 -in eku-ca.crt -outform DER -out ../eku-ca.der
 
 # leaf <name> <CN> <extensions section> <key: rsa|ec> [startdate enddate]
 leaf() {
@@ -180,8 +193,10 @@ sed -e 's/^database = index.txt/database = other-index.txt/' -e 's/^certificate 
 touch other-index.txt
 ossl ca -batch -config other-ca-sign.cnf -gencrl -crldays 3650 -out ../other-ca.crl
 
-cp ca.crt other-ca.crt ..
+cp ca.crt other-ca.crt eku-ca.crt ..
+mkdir -p ../ünïcode
+cp ca.crt ../client.crt ../client.key ../revoked.crl ../ünïcode/
 cd .. && rm -rf work
-chmod 0644 ./*.crt ./*.key ./*.der ./*.crl ./*.endpoint crldir/*
+chmod 0644 ./*.crt ./*.key ./*.der ./*.crl ./*.endpoint crldir/* ünïcode/*
 echo "$GENERATION" > .generation
 echo "gen-certs: wrote $(ls | wc -l | tr -d ' ') entries to out/test-certs"

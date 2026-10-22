@@ -9,12 +9,11 @@
 #undef MBEDTLS_PSA_CRYPTO_STORAGE_C
 #undef MBEDTLS_PSA_ITS_FILE_C
 
-/* Isolates are OS threads, and the PSA core holds process-wide state (the key slots, the DRBG). Windows
-   needs MBEDTLS_THREADING_ALT with its own mutexes; until that lands, Windows is not a supported target. */
-#if !defined(_WIN32)
+/* Isolates are OS threads, and the PSA core holds process-wide state (the key slots, the DRBG). kama's isolates
+   are pthreads on every target, Windows included, where mingw-w64 and zig link winpthreads statically, so Mbed
+   TLS's mutexes are pthread mutexes everywhere. */
 #define MBEDTLS_THREADING_C
 #define MBEDTLS_THREADING_PTHREAD
-#endif
 
 /* The self-tests certify a build; running one is not this package's job. */
 #undef MBEDTLS_SELF_TEST

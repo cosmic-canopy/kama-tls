@@ -34,17 +34,40 @@ extern fn int32 ktls_config_trust_count(UnsafePtr c);
 extern fn int32 ktls_config_crl_file(UnsafePtr c, UnsafeConstPtr<cchar> path);
 extern fn int32 ktls_config_crl_pem(UnsafePtr c, UnsafeConstPtr<uint8> data, usize len);
 extern fn int32 ktls_config_crl_complete(UnsafePtr c, int32 on);
+@compileFor(OS_WINDOWS)
+extern fn int32 ktls_config_trust_windows(UnsafePtr c);
 
 // The CA bundles an operating system keeps, in the order they are tried by `trustSystem()`: Debian/Ubuntu,
 // RHEL/Fedora, openSUSE, Alpine and macOS (Apple maintains /etc/ssl/cert.pem from its own trust store).
 comptime isize SYSTEM_BUNDLES = 5;
 
+@compileFor(!OS_WINDOWS)
 fn string systemBundle(isize i) {
     if (i == 0) { return "/etc/ssl/certs/ca-certificates.crt"; }
     if (i == 1) { return "/etc/pki/tls/certs/ca-bundle.crt"; }
     if (i == 2) { return "/etc/ssl/ca-bundle.pem"; }
     if (i == 3) { return "/etc/ssl/cert.pem"; }
     return "/usr/local/etc/openssl/cert.pem";
+}
+
+// What `trustSystem()` trusts when no file is named: the first CA bundle found among the usual places.
+@compileFor(!OS_WINDOWS)
+unsafe fn Result<Unit, TlsError> systemRoots(UnsafePtr c) {
+    isize i = 0;
+    while (i < SYSTEM_BUNDLES) {
+        string candidate = systemBundle(i: i);
+        if (exists(path: candidate)) { return checked(rc: ktls_config_trust_file(c: c, path: candidate.cstr())); }
+        i = i + 1;
+    }
+    return Result::Err(error: TlsError::Config(code: -5, detail: "no system CA bundle found (set SSL_CERT_FILE)"));
+}
+
+// Windows keeps no bundle file: the roots its certificate store trusts for server authentication, imported by
+// ktls_config_trust_windows. The places a bundle sits elsewhere are not probed, because here "/etc/ssl/cert.pem"
+// is C:\etc\ssl\cert.pem, under a drive root where any user may make a directory.
+@compileFor(OS_WINDOWS)
+unsafe fn Result<Unit, TlsError> systemRoots(UnsafePtr c) {
+    return checked(rc: ktls_config_trust_windows(c: c));
 }
 
 // `<8 lower-case hex digits>.r<digits>`: a CRL in OpenSSL's hashed-directory layout.
@@ -136,33 +159,26 @@ type resource TlsConfig implements Sendable {
     }
 
     // Trust what the operating system trusts: the file named by SSL_CERT_FILE if it is set (as OpenSSL
-    // honours it), else the first CA bundle found among the usual places. Answers how many certificates are
-    // trusted afterwards. Windows' certificate store is not read.
+    // honours it), else the system's roots. Answers how many certificates are trusted afterwards.
+    //
+    // The system's roots are the first CA bundle found among the usual places on Linux and macOS. On Windows they
+    // are imported from its certificate store: the trusted roots that Windows allows for server authentication,
+    // less any in its Disallowed store. An import cannot carry what Windows' own verifier applies beyond the store:
+    // a root distrusted only for certificates issued after a date, or a root Windows downloads the first time it
+    // needs one (automatic root update), which the store lacks until then. SSL_CERT_FILE names a bundle instead.
     public unsafe fn Result<isize, TlsError> trustSystem() {
         Optional<string> named = env(name: "SSL_CERT_FILE");
         return this.trustSystemWith(certFile: give named);
     }
 
     // `trustSystem()` with SSL_CERT_FILE's value supplied by the caller (which may keep its own environment):
-    // `Some(path)` trusts that file, `None` the first CA bundle found among the usual places.
+    // `Some(path)` trusts that file, `None` the system's roots.
     public unsafe fn Result<isize, TlsError> trustSystemWith(Optional<string> certFile) {
         Optional<string> named = give certFile;
-        string chosen = "";
-        match (give named) {
-            case Some(value: p): { chosen = give p; }
-            case None: {
-                isize i = 0;
-                while (i < SYSTEM_BUNDLES && chosen.length() == 0) {
-                    string candidate = systemBundle(i: i);
-                    if (exists(path: candidate)) { chosen = copy candidate; }
-                    i = i + 1;
-                }
-            }
+        Result<Unit, TlsError> loaded = match (give named) {
+            case Some(value: p): this.trustFile(path: p);
+            case None: systemRoots(c: this.handle);
         };
-        if (chosen.length() == 0) {
-            return Result::Err(error: TlsError::Config(code: -5, detail: "no system CA bundle found (set SSL_CERT_FILE)"));
-        }
-        Result<Unit, TlsError> loaded = this.trustFile(path: chosen);
         return match (give loaded) {
             case Ok(value: u): Result::Ok(value: this.trustCount());
             case Err(error: e): Result::Err(error: give e);

@@ -6,6 +6,26 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.7]
+
+Needs **kama ≥ 0.9.690**, and so do its tests.
+
+### Added
+- **Windows (x86-64).** The package builds and its tests pass there, debug and release. Mbed TLS's locks are pthread
+  mutexes on every target now, Windows included, where kama's isolates are winpthreads.
+- **`trustSystem()` on Windows imports the roots of its certificate store**, which a client verifying a public server
+  needs, since Windows keeps no CA bundle file. They are the ROOT store's roots that Windows allows for server
+  authentication, less any its Disallowed store also holds, as curl's `--ca-native` and rustls-native-certs import
+  them. Windows also trusts a root it downloads the first time it meets one, which an import cannot see, so
+  `SSL_CERT_FILE` still names a bundle instead. A store that cannot be read, or holds no such root, is a
+  `TlsError::Config` with code -9. The places a bundle sits on Linux and macOS are not looked for on Windows.
+- **A file path that is not ASCII opens on Windows.** `trustFile`, `identityFiles`, `revocationFile` and
+  `SSL_CERT_FILE` read a UTF-8 path as UTF-16 there. Elsewhere nothing changes.
+
+### Changed
+- **Needs kama 0.9.690**, up from 0.9.523, for a `link` entry gated to Windows (crypt32). The tests already needed
+  0.9.690, so the package and its tests have one floor again.
+
 ## [0.1.6] — 2026-10-20
 
 Needs **kama ≥ 0.9.523**; its tests need 0.9.690.

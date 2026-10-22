@@ -1,7 +1,7 @@
 # Roadmap
 
-Where this is, 2026-10-19: `TlsConfig`, `TlsStream<S>` and `Certificate` are done and tested, debug and release, on
-macOS arm64 and Linux aarch64. Before 0.1.0 everything was exercised end to end against PostgreSQL 14–19, which added
+Where this is, 2026-10-22: `TlsConfig`, `TlsStream<S>` and `Certificate` are done and tested, debug and release, on
+macOS arm64, Linux aarch64 and x86-64, and Windows x86-64. Before 0.1.0 everything was exercised end to end against PostgreSQL 14–19, which added
 failures in words (alerts by name, key and PEM errors), the RFC 5929 SHA-224 fix, chain verification without SNI,
 certificate names from a session or a file, CRLs with OpenSSL's every-certificate rule, whether the server asked for a
 client certificate, a step-wise identity with a pair check, and key logging.
@@ -10,14 +10,14 @@ Published on the official registry: 0.1.0 (2026-10-02); 0.1.1 (2026-10-03), what
 it needs kama 0.9.523; 0.1.2 (2026-10-13), the RFC 9266 tls-exporter channel binding (phase 4); 0.1.3 (2026-10-18),
 no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Sendable`; 0.1.4 (2026-10-18), a server
 holds several identities and chooses one per handshake by SNI (phase 5); 0.1.5 (2026-10-19), a race on shared
-configurations fixed (phase 6). 0.1.6 builds on kama 0.9.690 and on the 0.9.707 in development, and its tests need
-0.9.690; the package's floor stays 0.9.523. It waits for the registry. Once the registry has published it, the
-CHANGELOG heading takes the date, as `cac8a2e` did for 0.1.5.
+configurations fixed (phase 6); 0.1.6 (2026-10-20), builds on kama 0.9.690 and later, and its tests need 0.9.690.
+0.1.7 is Windows (phase 7), and raises the floor to 0.9.690. It is committed, and publishes on the maintainer's word.
+Once the registry has published it, the CHANGELOG heading takes the date, as `cac8a2e` did for 0.1.5.
 
-**Next: every platform kama builds for** ([Platforms](#platforms)), starting with Windows (phase 7). Its section was
-checked against cross builds on 2026-10-19 and has two questions for the maintainer. After the platforms comes
-session resumption on TLS 1.3 and 1.2 ([Session resumption](#session-resumption)). The maintainer settled the scope
-questions on 2026-10-18; the decisions are recorded in each section.
+**Next: the rest of the platforms kama builds for** ([Platforms](#platforms)), WebAssembly (phase 8) and then bare
+metal (phase 11, questions first). Between them comes session resumption on TLS 1.3 and 1.2
+([Session resumption](#session-resumption)). The maintainer settled the scope questions on 2026-10-18; the decisions
+are recorded in each section.
 
 | # | phase | state |
 |---|---|---|
@@ -28,9 +28,9 @@ questions on 2026-10-18; the decisions are recorded in each section.
 | — | Publish 0.1.0 | **done** (2026-10-02) |
 | 4 | RFC 9266 tls-exporter channel binding as `TlsStream.tlsExporter()`, TLS 1.3 only ([issue #1](https://github.com/cosmic-canopy/kama-tls/issues/1)); see [Channel bindings](#channel-bindings) | **done** (0.1.2, 2026-10-13) |
 | 5 | A server holds several identities and serves each handshake the ones whose certificate names the SNI host; see [Server identities](#server-identities) | **done** (0.1.4, 2026-10-18) |
-| 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **done** (0.1.5, unpublished) |
-| 7 | Windows; see [Platforms](#platforms) | **next** |
-| 8 | WebAssembly (`--target WASM`), the wasm leg `AGENTS.package.md` asks of a package that vendors C; see [Platforms](#platforms) | planned |
+| 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **done** (0.1.5, 2026-10-19) |
+| 7 | Windows; see [Platforms](#platforms) | **done** (0.1.7, unpublished) |
+| 8 | WebAssembly (`--target WASM`), the wasm leg `AGENTS.package.md` asks of a package that vendors C; see [Platforms](#platforms) | **next** |
 | 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | planned |
 | 10 | Session resumption on TLS 1.2; see [Session resumption](#session-resumption) | planned |
 | 11 | Bare metal (`--target EMBEDDED`); see [Platforms](#platforms) | planned, questions first |
@@ -100,7 +100,7 @@ Phase 5, 0.1.4. A server can answer several host names from one listener, each w
 
 ## Shared configurations
 
-Phase 6, **done** (0.1.5, unpublished). A data race found while building phase 5. No run had been seen to fail.
+Phase 6, **done** (0.1.5, 2026-10-19). A data race found while building phase 5. No run had been seen to fail.
 
 **The race.** `TlsConfig` is `Sendable`, and `share()` hands out another handle on the same C configuration.
 - Every setter checked `frozen` and then changed the configuration, as two steps.
@@ -228,81 +228,100 @@ wire.
 
 ## Platforms
 
-**Decided (the maintainer, 2026-10-18): every platform kama builds for.** Tested today: macOS arm64 and Linux
-aarch64 locally, Linux x86-64 and macOS arm64 in CI. kama's targets are `HOST`, `MACOS`, `WINDOWS`, `LINUX`, `WASM`
-and `EMBEDDED`, so what remains is Windows, WebAssembly and bare metal. A leg is green when `tools/test.sh` (or its
-equivalent for that target) passes there, debug and release.
+**Decided (the maintainer, 2026-10-18): every platform kama builds for.** Tested today:
+- locally: macOS arm64, Linux aarch64 and Windows x86-64;
+- in CI: Linux x86-64, macOS arm64 and Windows x86-64.
 
-### Windows (phase 7, next)
+kama's targets are `HOST`, `MACOS`, `WINDOWS`, `LINUX`, `WASM` and `EMBEDDED`, so what remains is WebAssembly and bare
+metal. A leg is green when `tools/test.sh` (or its equivalent for that target) passes there, debug and release.
 
-kama builds for Windows: `--target WINDOWS`, which is `<arch>-windows-gnu`, with mingw-w64 or zig. The gate's
-Windows leg is CI's `windows-latest`. The maintainer has a Windows machine for a local run when CI is not enough:
-ask for one rather than guess at a failure.
+### Windows (phase 7, done)
 
-**Checked on 2026-10-19, by cross-building the tests from macOS with zig 0.16.0.** Nothing has run on Windows yet.
-- **The package builds for Windows today**, with no error or warning:
-  - for x86-64 and aarch64, on kama 0.9.675 and on 0.9.523;
-  - the binary imports only system DLLs: KERNEL32, WS2_32, bcrypt, ntdll and the UCRT.
-- **kama's isolates are winpthreads on Windows.** `kama_isolate.h` includes `<pthread.h>` and calls
-  `pthread_create` on every target. mingw-w64 and zig both ship winpthreads, and it is linked statically: there is no
-  `libwinpthread-1.dll` import.
-- **`MBEDTLS_THREADING_PTHREAD` builds on Windows the same way.** I took the `!defined(_WIN32)` guard out of
-  `csrc/ktls_crypto_user_config.h` in a scratch copy. On both compilers the test binary then linked
-  `mbedtls_mutex_lock` over `pthread_mutex_lock`, with no new DLL.
-- **Two isolates may race into `ktls_init`'s first call.** `psa_crypto_init` sets up each subsystem under
-  `mbedtls_threading_psa_globaldata_mutex`. So the atomic flag only skips repeated work, as it does on POSIX.
-- **Entropy is already linked.** kama's driver links `bcrypt` for every Windows target, because std::random's
-  entropy is `BCryptGenRandom`. 0.9.523 does too: the binaries import `bcrypt.dll`. Mbed TLS's builtin source
-  finds `BCryptGenRandom` there.
-- **CI can pin the floor on Windows.** The kama v0.9.523 release has `kama-windows-x64-v0.9.523.tar.gz`, and a
-  `-bundled` one with zig. `install.ps1` installs either from `$env:KAMA_VERSION`.
+**Done on 2026-10-22, as 0.1.7 (unpublished).** kama builds for Windows with `--target WINDOWS`, which is
+`<arch>-windows-gnu`. The gate is green on a Windows 11 x86-64 machine, debug and release, on three toolchains:
+- kama 0.9.690 with msys2's UCRT64 clang;
+- the 0.9.719 dev build with msys2's UCRT64 clang;
+- kama 0.9.690's release with zig bundled, which is CI's `windows-latest` leg.
 
-**So the plan written on 2026-10-18 changes:**
-- **Threading: `MBEDTLS_THREADING_PTHREAD` on every target.** Drop the `_WIN32` guard and its comment.
-  - The `MBEDTLS_THREADING_ALT` layer is not needed. That was a `threading_alt.h` over `SRWLOCK` and
-    `CONDITION_VARIABLE`, `mbedtls_threading_set_alt()` before `psa_crypto_init`, and `ktls_init` as an
-    `InitOnceExecuteOnce`.
-  - It was planned against a winpthreads DLL and a toolchain without winpthreads, and kama has neither.
-  - The configuration's lock from phase 6, and Mbed TLS's own locks, then follow with no code change.
-- **Entropy: nothing to add.** The old plan's `bcrypt` link entry is already the driver's. Also, 0.9.523 refuses a
-  `link` entry with `compileFor`: it takes strings only, and the object form arrived in 0.9.609.
-- **`trustSystem()` reads the system store.** It reads a CA bundle file today, and Windows has none. So on Windows
-  it imports roots through crypt32. **Decided (the maintainer, 2026-10-22).** This is the established import, as
-  curl's `--ca-native` with OpenSSL and rustls-native-certs do it:
-  - read the ROOT store, `CertOpenSystemStoreW(0, L"ROOT")`, and not the CA store, whose intermediates would
-    become trust anchors;
-  - keep a certificate only when Windows allows it for server authentication: `CertGetEnhancedKeyUsage` answers
-    `szOID_PKIX_KP_SERVER_AUTH`, or no restriction at all;
-  - skip any certificate the Disallowed store also holds;
-  - add each one kept with `mbedtls_x509_crt_parse_der` on its `pbCertEncoded`.
+Before that, on 2026-10-19, the tests were cross-built from macOS with zig 0.16.0, for x86-64 and aarch64. Those
+binaries import only system DLLs: KERNEL32, WS2_32, bcrypt, ntdll and the UCRT.
 
-  `SSL_CERT_FILE` stays the override.
+**Threading: `MBEDTLS_THREADING_PTHREAD` on every target.** The `_WIN32` guard in
+`csrc/ktls_crypto_user_config.h` is gone.
+- kama's isolates are pthreads everywhere: `kama_isolate.h` calls `pthread_create`. mingw-w64 and zig link
+  winpthreads statically, so there is no `libwinpthread-1.dll` import.
+- So the configuration's lock from phase 6, and Mbed TLS's own locks, follow with no code change.
+- The `MBEDTLS_THREADING_ALT` layer planned on 2026-10-18 was not needed. That was a `threading_alt.h` over
+  `SRWLOCK`, and `ktls_init` as an `InitOnceExecuteOnce`. It was planned against a winpthreads DLL and a toolchain
+  without winpthreads, and kama has neither.
+- Two isolates may race into `ktls_init`'s first call. `psa_crypto_init` sets up each subsystem under
+  `mbedtls_threading_psa_globaldata_mutex`, so the atomic flag only skips repeated work, as on POSIX.
 
-  Importing loses what Windows' own verifier applies, which [OS verification](#os-verification) (phase 12) is for:
-  - a root distrusted only for certificates issued after a date;
-  - roots Windows downloads only when its chain builder first needs one (automatic root update), so the ROOT store
-    can lack a root the system would trust.
+**Entropy: nothing added.** kama's driver links `bcrypt` for every Windows target, because std::random's entropy is
+`BCryptGenRandom`, and Mbed TLS's builtin source finds `BCryptGenRandom` there.
 
-  The API comment says so, and points to `SSL_CERT_FILE`.
+**`trustSystem()` imports the ROOT store** (decided by the maintainer, 2026-10-22), as curl's `--ca-native` with
+OpenSSL and rustls-native-certs do. The code is `ktls_config_trust_windows` in `csrc/ktls.c`.
+- It reads `CertOpenSystemStoreW(0, L"ROOT")`, not the CA store, whose intermediates would become trust anchors.
+- It keeps a root only when Windows allows it for server authentication (`ktls_win_root_kept`).
+  - `CertGetEnhancedKeyUsage` must list `szOID_PKIX_KP_SERVER_AUTH`, or list nothing with `CRYPT_E_NOT_FOUND`,
+    which means every use.
+  - Nothing listed without that error means no use. An empty EKU property is how a root is turned off.
+  - The usages are the intersection of the certificate's EKU extension and the store's property, as Microsoft
+    documents, so a property cannot widen what a certificate allows.
+- It skips a root the Disallowed store also holds (`CERT_FIND_EXISTING`).
+- Each kept root goes to `mbedtls_x509_crt_parse_der`. A root Mbed TLS cannot parse is counted as skipped, as in a
+  bundle.
+- A store that cannot be opened, or keeps no root, is `KTLS_ERR_SYSTEM_STORE` (-9).
+- crypt32 is linked by `{ "name": "crypt32", "compileFor": ["OS_WINDOWS"] }`. 0.9.523 refuses a `link` entry with
+  `compileFor`, so the floor rose to 0.9.690 (decided by the maintainer, 2026-10-22). The tests already needed
+  0.9.690, so CI has one install and the README one floor.
+- `systemRoots` in `src/config.kama` has a `@compileFor` twin per side. The Windows one never probes the bundle
+  paths: there `/etc/ssl/cert.pem` is `C:\etc\ssl\cert.pem`, under a drive root where any user may make a directory.
+- `SSL_CERT_FILE` stays the override.
 
-  **Decided (the maintainer, 2026-10-22): the `"kama"` floor rises to 0.9.690 with phase 7.**
-  - `kama.json` declares `{ "name": "crypt32", "compileFor": ["OS_WINDOWS"] }`. A `link` entry takes `compileFor`
-    from 0.9.609, and 0.9.523 refuses one.
-  - The tests already need 0.9.690, so CI drops its second install and the package-floor step, and `AGENTS.tls.md`
-    and the README go back to one floor.
-  - v0.9.690 has its release assets, Windows x64 included.
+**What an import loses is phase 12's** ([OS verification](#os-verification)). The API comment says so, and points
+to `SSL_CERT_FILE`.
+- A root distrusted only for certificates issued after a date.
+- Automatic root update, and that one is not hypothetical. Windows downloads a root the first time its own chain
+  builder needs one, so the ROOT store holds only the roots that machine has needed so far.
+  - On this Windows 11 machine it held 31 certificates. 9 were restricted to code signing or time stamping, 22 were
+    kept, and 21 parsed.
+  - A throwaway client with those 21 verified www.microsoft.com, github.com, kama-lang.org and www.google.com with
+    `Verify::Full`. Each one refused a client trusting only the test CA.
+  - A server whose root the machine has never needed would be refused.
 
-- **The gate.** Add a `windows-latest` leg to `.github/workflows/ci.yml`:
-  - `install.ps1` with `KAMA_VERSION: v0.9.690`, the tests' floor; that release has `kama-windows-x64-v0.9.690.tar.gz`;
-  - OpenSSL 3 for `tools/gen-certs.sh`;
-  - `tools/test.sh` under bash.
+**A path that is not ASCII failed on Windows, and is fixed.** Mbed TLS opens a file with `fopen`, which reads a
+path in the ANSI code page there.
+- Every file-based setter now reads through `ktls_load_file`. It opens a UTF-8 path with `_wfopen` on Windows and
+  `fopen` elsewhere, and otherwise does what `mbedtls_pk_load_file` does.
+- `trustFile`, `identityFiles`, `revocationFile` and `SSL_CERT_FILE` under `out/test-certs/ünïcode/` failed before
+  the fix and pass after it.
 
-  - **Line endings are settled.** A CRLF checkout, Git for Windows' usual default, breaks `tools/*.sh` under bash,
-    so `.gitattributes` keeps `*.sh` LF. kama itself reads CRLF sources: the tests checked clean on 0.9.690 and
-    0.9.720 with every `.kama`, `.c`, `.h` and manifest converted.
-  - **Watch on the first run:** the `KTLS_TEST_CERTS` path the tests get under Git Bash.
+**Tests.**
+- `tests/src/windows_test.kama` puts certificates in stores that `tests/csrc/windows_roots.c` makes in memory, and
+  never touches the machine's. The certificates are `ca.der` and `eku-ca.der`, a CA whose EKU is code signing alone
+  (gen-certs generation 7). The cases:
+  - no EKU at all;
+  - an EKU property of server and client authentication;
+  - client authentication alone;
+  - an empty property;
+  - the same root in Disallowed;
+  - code signing alone;
+  - a property claiming server authentication on the code-signing CA.
+- Breaking the predicate (keep any empty list, skip the Disallowed lookup) failed three of them.
+- `systemTrustTests` on Windows requires the import to keep at least one root, and an error fails rather than skips.
 
-  Then remove "Windows is not in the matrix" from the workflow comment, and update the README's platform line.
+**Watched for, and needing no change.**
+- Git Bash and msys2's bash both rewrite a POSIX path in an environment variable for a Windows program, so
+  `KTLS_TEST_CERTS` arrives as `C:/…`.
+- gen-certs' `openssl crl -hash` output carries no CR.
+- kama reads CRLF sources, and `.gitattributes` keeps `*.sh` LF.
+
+**The gate.** CI's `windows-latest` leg runs `tools/test.sh` under Git Bash, with OpenSSL 3 from Git for Windows.
+- It installs kama's release with zig bundled, by URL and SHA256.
+- install.ps1 would pick the slim release, because the image has C compilers, and slim kama compiles with whichever
+  `clang` is first on the PATH.
 
 ### WebAssembly (phase 8)
 
@@ -342,6 +361,8 @@ verifier knows more:
   - enterprise policy.
 - On macOS, `SecTrustEvaluateWithError` honours the keychain's trust settings. `trustSystem()` there reads
   `/etc/ssl/cert.pem` today.
+- Automatic root update is the gap most likely to be met. Phase 7 found 21 usable roots in a Windows 11 machine's
+  ROOT store. Enough for the servers it was tried on, but not for one whose root that machine has never needed.
 - Go's crypto/x509 and rustls-platform-verifier verify this way.
 
 **To settle in the design:**
@@ -362,5 +383,7 @@ verifier knows more:
 - **`mbedtls_pk_check_pair` is not used.** In TF-PSA-Crypto 1.2.0 it compares cached public halves, and a parsed
   RSA private key has none, so it refuses every RSA pair. ktls compares the public key it exports through PSA
   instead (`ktls_pair_matches`). Worth reporting upstream; drop the workaround when a release fixes it.
-- **`trustSystem()` reads a CA bundle file**, not the Windows certificate store or the macOS keychain. On macOS
-  that is `/etc/ssl/cert.pem`, which Apple maintains; `SSL_CERT_FILE` overrides it, as with OpenSSL.
+- **`trustSystem()` trusts roots, not the system's verifier.** On Linux and macOS it reads a CA bundle file; on macOS
+  that is `/etc/ssl/cert.pem`, which Apple maintains, not the keychain. On Windows it imports the ROOT store, which
+  lacks any root Windows has not yet downloaded. `SSL_CERT_FILE` overrides it everywhere, as with OpenSSL. Phase 12
+  is the system's verifier.

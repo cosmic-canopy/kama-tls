@@ -353,6 +353,7 @@ fn int32 channelBindingTests() {
     return f;
 }
 
+@compileFor(!OS_WINDOWS)
 fn int32 systemTrustTests() {
     Result<TlsConfig, TlsError> made = TlsConfig.client();
     TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "system trust: client config"); } };
@@ -360,6 +361,19 @@ fn int32 systemTrustTests() {
     return match (give n) {
         case Ok(value: k): check(ok: k > 100, what: "system trust: the OS bundle loads (more than 100 roots)");
         case Err(error: e): { string m = e.message(); println(s: "  SKIP system trust: ${m}"); return 0; }
+    };
+}
+
+// Windows always has a ROOT store, so an error is a failure, not a skip. How many roots it holds depends on the
+// machine, since Windows adds one the first time it needs it, so any number will do.
+@compileFor(OS_WINDOWS)
+fn int32 systemTrustTests() {
+    Result<TlsConfig, TlsError> made = TlsConfig.client();
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { return check(ok: false, what: "system trust: client config"); } };
+    Result<isize, TlsError> n = c.trustSystemWith(certFile: Optional::None);
+    return match (give n) {
+        case Ok(value: k): check(ok: k > 0, what: "system trust: the Windows ROOT store loads");
+        case Err(error: e): { string m = e.message(); return check(ok: false, what: "system trust: the Windows ROOT store (${m})"); }
     };
 }
 
