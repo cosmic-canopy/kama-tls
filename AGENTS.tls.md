@@ -42,7 +42,9 @@ maintainer's word.
   - on Windows, the import of the certificate store's roots (`ktls_config_trust_windows`, `ktls_win_root_kept`);
   - a `_Static_assert` per size kama spells as a literal.
 
-  Entropy is Mbed TLS's builtin source (getrandom / getentropy / BCryptGenRandom).
+  Entropy is Mbed TLS's builtin source (`tf-psa-crypto/platform/platform_util.c`): the getrandom syscall on Linux
+  with glibc, BCryptGenRandom on Windows, and `fopen("/dev/random")` on every other Unix-like system, macOS and
+  emscripten among them.
 
   Its C symbols are `ktls_…`, because `kama_…` is reserved.
 - **Kama does the I/O.** Mbed TLS only ever sees memory buffers, and `TlsStream<S>` moves bytes over any
