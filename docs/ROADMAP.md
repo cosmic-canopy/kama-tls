@@ -271,17 +271,16 @@ ask for one rather than guess at a failure.
   roots only when its own chain builder first needs one (automatic root update), so the ROOT store can lack a root
   the system would trust. The API comment says so, and points to `SSL_CERT_FILE`.
 
-  **For the maintainer to decide before code:**
-  - **How crypt32 is linked**, since 0.9.523 cannot gate a `link` entry to Windows. Either:
-    - raise the `"kama"` floor to 0.9.609 or later and declare `{ "name": "crypt32", "compileFor": ["OS_WINDOWS"] }`.
-      The release named as the floor must have its assets.
-    - or load it at run time with `LoadLibraryExW(L"crypt32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)` and
-      `GetProcAddress`, which keeps 0.9.523.
+  **Decided (the maintainer, 2026-10-22): the `"kama"` floor rises to 0.9.690 with phase 7.**
+  - `kama.json` declares `{ "name": "crypt32", "compileFor": ["OS_WINDOWS"] }`. A `link` entry takes `compileFor`
+    from 0.9.609, and 0.9.523 refuses one.
+  - The tests already need 0.9.690, so CI drops its second install and the package-floor step, and `AGENTS.tls.md`
+    and the README go back to one floor.
+  - v0.9.690 has its release assets, Windows x64 included.
 
-    A `select.TARGET.WINDOWS.link` entry passes 0.9.523's check. It is unverified whether it reaches a native
-    Windows build, which is the `HOST` target there, or a consumer's build.
-  - **Which stores, and which certificates in them.** Whether to read the "CA" store as well as "ROOT", and whether
-    to keep only certificates trusted for serverAuth, as CPython's `ssl.create_default_context()` does on Windows.
+  **Still open: which stores, and which certificates in them.** Under discussion with the maintainer on 2026-10-22;
+  the choice is recorded here before code.
+
 - **The gate.** Add a `windows-latest` leg to `.github/workflows/ci.yml`:
   - `install.ps1` with `KAMA_VERSION: v0.9.690`, the tests' floor; that release has `kama-windows-x64-v0.9.690.tar.gz`;
   - OpenSSL 3 for `tools/gen-certs.sh`;
