@@ -11,8 +11,14 @@ it needs kama 0.9.523; 0.1.2 (2026-10-13), the RFC 9266 tls-exporter channel bin
 no IP literal as SNI, an IP matched against IP SANs alone, and `TlsError` `Sendable`; 0.1.4 (2026-10-18), a server
 holds several identities and chooses one per handshake by SNI (phase 5); 0.1.5 (2026-10-19), a race on shared
 configurations fixed (phase 6); 0.1.6 (2026-10-20), builds on kama 0.9.690 and later, and its tests need 0.9.690.
-0.1.7 is Windows (phase 7), and raises the floor to 0.9.690. It is committed, and publishes on the maintainer's word.
-Once the registry has published it, the CHANGELOG heading takes the date, as `cac8a2e` did for 0.1.5.
+0.1.7 is Windows (phase 7), and raises the floor to 0.9.690. It is pushed (`5f30fa2`), CI is green on Linux x86-64,
+macOS arm64 and Windows x86-64, and the maintainer publishes it from the registry project on the other machine. Once the registry has published it, the CHANGELOG heading takes the
+date, as `cac8a2e` did for 0.1.5.
+
+Phase 7 left two runs for the Mac, neither of which blocks phase 8. The POSIX paths changed only in the file loader
+(`ktls_load_file`), and CI's Linux x86-64 and macOS arm64 legs cover them.
+- the gate on macOS arm64 and Linux aarch64 with the dev compiler;
+- `tools/tsan.sh`.
 
 **Next: the rest of the platforms kama builds for** ([Platforms](#platforms)), WebAssembly (phase 8) and then bare
 metal (phase 11, questions first). Between them comes session resumption on TLS 1.3 and 1.2
@@ -318,24 +324,59 @@ path in the ANSI code page there.
 - gen-certs' `openssl crl -hash` output carries no CR.
 - kama reads CRLF sources, and `.gitattributes` keeps `*.sh` LF.
 
-**The gate.** CI's `windows-latest` leg runs `tools/test.sh` under Git Bash, with OpenSSL 3 from Git for Windows.
+**The gate.** CI's `windows-latest` leg runs `tools/test.sh` under Git Bash, with OpenSSL 3 from Git for Windows. It
+was green on its first run, for `5f30fa2`.
 - It installs kama's release with zig bundled, by URL and SHA256.
 - install.ps1 would pick the slim release, because the image has C compilers, and slim kama compiles with whichever
   `clang` is first on the PATH.
 
-### WebAssembly (phase 8)
+### WebAssembly (phase 8, next)
 
 `AGENTS.package.md` asks every package that vendors C for a wasm leg (`--target WASM`, run under node in a container
-with emcc), and this package has none yet. To settle first, by building rather than reading:
-- **Threading.** Whether kama's wasm target has threads (isolates) at all, and so whether `MBEDTLS_THREADING_C`
-  stays on there. Without threads it comes off for wasm only, with the reason written in
+with emcc), and this package has none yet. kama's `WASM` target is `wasm32-emscripten-none`, built with `emcc`. It
+emits `.js` + `.wasm`, and node runs it (node ≥ 16, since kama passes `-msimd128`).
+
+**Read on 2026-10-22, in kama's driver and docs and in the vendored sources. Nothing has been built yet.** Settle
+each one by building:
+- **Entropy does not come from `getentropy`, as this section first guessed.**
+  - Mbed TLS's builtin source (`tf-psa-crypto/platform/platform_util.c`) uses `getrandom` only under `__linux__`
+    with glibc. Emscripten defines `__unix__`, so it counts as Unix-like, but not `__linux__`.
+  - So it falls back to `fopen("/dev/urandom")`, through emscripten's virtual filesystem. Emscripten backs that
+    device with the host's random source, and it is there only while the filesystem is linked in.
+  - The alternative: `MBEDTLS_PSA_DRIVER_GET_ENTROPY`, with a `mbedtls_platform_get_entropy` in `csrc/` calling
+    `getentropy`. kama's own std::random does that on emscripten (`include/kama_random.h`).
+  - Either way, a test that a session handshakes proves the source works. Choose by what the build shows.
+- **Threading.** kama's isolates on wasm are emscripten pthreads: Web Workers over a SharedArrayBuffer, with
+  `-sPROXY_TO_PTHREAD`. So `MBEDTLS_THREADING_PTHREAD` may stay on, but kama passes `-pthread` only at link, and only
+  for a program that starts a thread. Build to see two things:
+  - whether Mbed TLS's objects link into a threaded program, since wasm-ld refuses shared memory with an object
+    built without atomics;
+  - whether a program with no isolate links against emscripten's single-thread pthread stubs.
+
+  If threads cannot work, `MBEDTLS_THREADING_C` comes off for wasm alone, with the reason in
   `csrc/ktls_crypto_user_config.h`.
-- **Entropy.** Mbed TLS's builtin source on emscripten. `getentropy` is backed by `crypto.getRandomValues`; confirm
-  that this is the path Mbed TLS takes.
-- **I/O.** `TlsStream<S>` needs only a `ReliableStream`, so a TLS session over whatever stream the wasm host gives
-  (a WebSocket, a pipe) works unchanged. The tests' in-memory pipe runs as it is. The loopback-TCP case and the
-  file-based fixtures (`trustFile`, `identityFiles`, `trustSystem`) need a gate (`@compileFor`) or a wasm
-  equivalent: fixtures as bytes through `trustPem` / `identityPem`.
+- **Files and the environment.** The tests read every fixture from the directory `KTLS_TEST_CERTS` names. Under
+  node, emscripten's filesystem lives in memory and its `getenv` does not see the host's environment, unless the
+  build asks (`-sNODERAWFS=1` gives node's real filesystem). So either:
+  - the wasm build gets that; or
+  - the fixtures arrive as bytes (`trustPem`, `identityPem`, `revocationPem`), and the file-based cases are gated
+    `@compileFor(!ARCH_WASM32)`.
+- **Sockets.** `tests/src/tcp_test.kama` needs a loopback TCP listener. It is gated `!ARCH_WASM32` unless kama's
+  std::net runs there.
+- **The rest of the I/O.** `TlsStream<S>` needs only a `ReliableStream`, so a session over whatever stream the host
+  gives works unchanged, and the tests' in-memory pipe runs as it is.
+
+**Where it runs.** The leg needs emcc and node.
+- On the Mac they are in `localhost/kama-dev` (podman), with a Linux kama inside the container, as the Linux aarch64
+  leg is run (`AGENTS.tls.md`).
+- The Windows machine has neither, and no WSL; emsdk and node install natively there if the leg should run on it too.
+- CI: a job on `ubuntu-latest` with emsdk and node.
+
+**First steps.**
+1. Write `tools/test-wasm.sh`. In the container it runs `kama pkg install tests/kama.json`, then
+   `kama build tests/kama.json --target WASM -o "$tmp/tests.js"`, then `node "$tmp/tests.js"`.
+2. Run it before changing anything, and read what fails, as phase 7's baseline did on Windows.
+3. Decide entropy, files and threading from what the build says, and raise each decision with the maintainer.
 
 ### Bare metal (phase 11, questions first)
 
