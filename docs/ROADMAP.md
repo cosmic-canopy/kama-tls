@@ -34,6 +34,7 @@ questions on 2026-10-18; the decisions are recorded in each section.
 | 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | planned |
 | 10 | Session resumption on TLS 1.2; see [Session resumption](#session-resumption) | planned |
 | 11 | Bare metal (`--target EMBEDDED`); see [Platforms](#platforms) | planned, questions first |
+| 12 | `trustSystem()` chains verified by the operating system, on Windows and macOS; see [OS verification](#os-verification) | planned, design first |
 
 ## Channel bindings
 
@@ -266,10 +267,23 @@ ask for one rather than guess at a failure.
 - **Entropy: nothing to add.** The old plan's `bcrypt` link entry is already the driver's. Also, 0.9.523 refuses a
   `link` entry with `compileFor`: it takes strings only, and the object form arrived in 0.9.609.
 - **`trustSystem()` reads the system store.** It reads a CA bundle file today, and Windows has none. So on Windows
-  it reads the store through crypt32: `CertOpenSystemStoreW(0, L"ROOT")`, adding each certificate's
-  `pbCertEncoded` with `mbedtls_x509_crt_parse_der`. `SSL_CERT_FILE` stays the override. Windows downloads some
-  roots only when its own chain builder first needs one (automatic root update), so the ROOT store can lack a root
-  the system would trust. The API comment says so, and points to `SSL_CERT_FILE`.
+  it imports roots through crypt32. **Decided (the maintainer, 2026-10-22).** This is the established import, as
+  curl's `--ca-native` with OpenSSL and rustls-native-certs do it:
+  - read the ROOT store, `CertOpenSystemStoreW(0, L"ROOT")`, and not the CA store, whose intermediates would
+    become trust anchors;
+  - keep a certificate only when Windows allows it for server authentication: `CertGetEnhancedKeyUsage` answers
+    `szOID_PKIX_KP_SERVER_AUTH`, or no restriction at all;
+  - skip any certificate the Disallowed store also holds;
+  - add each one kept with `mbedtls_x509_crt_parse_der` on its `pbCertEncoded`.
+
+  `SSL_CERT_FILE` stays the override.
+
+  Importing loses what Windows' own verifier applies, which [OS verification](#os-verification) (phase 12) is for:
+  - a root distrusted only for certificates issued after a date;
+  - roots Windows downloads only when its chain builder first needs one (automatic root update), so the ROOT store
+    can lack a root the system would trust.
+
+  The API comment says so, and points to `SSL_CERT_FILE`.
 
   **Decided (the maintainer, 2026-10-22): the `"kama"` floor rises to 0.9.690 with phase 7.**
   - `kama.json` declares `{ "name": "crypt32", "compileFor": ["OS_WINDOWS"] }`. A `link` entry takes `compileFor`
@@ -277,9 +291,6 @@ ask for one rather than guess at a failure.
   - The tests already need 0.9.690, so CI drops its second install and the package-floor step, and `AGENTS.tls.md`
     and the README go back to one floor.
   - v0.9.690 has its release assets, Windows x64 included.
-
-  **Still open: which stores, and which certificates in them.** Under discussion with the maintainer on 2026-10-22;
-  the choice is recorded here before code.
 
 - **The gate.** Add a `windows-latest` leg to `.github/workflows/ci.yml`:
   - `install.ps1` with `KAMA_VERSION: v0.9.690`, the tests' floor; that release has `kama-windows-x64-v0.9.690.tar.gz`;
@@ -316,6 +327,30 @@ Mbed TLS is built for small devices, so `--target EMBEDDED` is possible. It need
 - **Threading.** Whether it has threads.
 - **Which API survives.** The file-based calls (`trustFile`, `identityFiles`, `trustSystem`, `revocationDir`) do
   not exist without a filesystem.
+
+## OS verification
+
+Phase 12, planned on 2026-10-22 when phase 7 chose to import Windows' roots. Its design comes first, in this
+section.
+
+**Why.** An imported root store is the established way to trust what the system trusts, but the system's own
+verifier knows more:
+- On Windows, `CertGetCertificateChain` and `CertVerifyCertificateChainPolicy` with `CERT_CHAIN_POLICY_SSL` honour:
+  - the Disallowed store;
+  - Microsoft's date-based partial distrust of a root;
+  - automatic root update;
+  - enterprise policy.
+- On macOS, `SecTrustEvaluateWithError` honours the keychain's trust settings. `trustSystem()` there reads
+  `/etc/ssl/cert.pem` today.
+- Go's crypto/x509 and rustls-platform-verifier verify this way.
+
+**To settle in the design:**
+- whether it is a `Verify` mode or the meaning of `trustSystem()`;
+- how it meets this package's own rules:
+  - `Verify::Chain` (no name compared);
+  - the CRL options;
+  - an IP literal matched against IP SANs alone;
+- what Linux, which has no system verifier, does: it keeps the bundle.
 
 ## Known differences from OpenSSL-based clients
 
