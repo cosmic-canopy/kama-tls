@@ -1,0 +1,2 @@
+# The scripts run under a POSIX shell on every host, Windows (Git Bash) included, where a CRLF checkout breaks them.
+*.sh text eol=lf

@@ -283,14 +283,14 @@ ask for one rather than guess at a failure.
   - **Which stores, and which certificates in them.** Whether to read the "CA" store as well as "ROOT", and whether
     to keep only certificates trusted for serverAuth, as CPython's `ssl.create_default_context()` does on Windows.
 - **The gate.** Add a `windows-latest` leg to `.github/workflows/ci.yml`:
-  - `install.ps1` with `KAMA_VERSION: v0.9.523`;
+  - `install.ps1` with `KAMA_VERSION: v0.9.690`, the tests' floor; that release has `kama-windows-x64-v0.9.690.tar.gz`;
   - OpenSSL 3 for `tools/gen-certs.sh`;
   - `tools/test.sh` under bash.
 
-  Watch for two things on the first run, neither seen yet:
-  - **Line endings.** A checkout with CRLF breaks `tools/*.sh` under bash. A `.gitattributes` with
-    `*.sh text eol=lf` settles it.
-  - **The certificate path.** Check the `KTLS_TEST_CERTS` path the tests get under Git Bash.
+  - **Line endings are settled.** A CRLF checkout, Git for Windows' usual default, breaks `tools/*.sh` under bash,
+    so `.gitattributes` keeps `*.sh` LF. kama itself reads CRLF sources: the tests checked clean on 0.9.690 and
+    0.9.720 with every `.kama`, `.c`, `.h` and manifest converted.
+  - **Watch on the first run:** the `KTLS_TEST_CERTS` path the tests get under Git Bash.
 
   Then remove "Windows is not in the matrix" from the workflow comment, and update the README's platform line.
 
