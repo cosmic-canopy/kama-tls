@@ -71,6 +71,11 @@ int32_t ktls_config_identity_pem(ktls_config *c, const uint8_t *cert, size_t cer
                                  const uint8_t *key, size_t key_len, const uint8_t *password, size_t password_len);
 int32_t ktls_config_alpn(ktls_config *c, const uint8_t *protocol, size_t len);   /* append one, in preference order */
 int32_t ktls_config_versions(ktls_config *c, int32_t min, int32_t max);         /* 0x0303 TLS 1.2, 0x0304 TLS 1.3 */
+/* Session resumption, TLS 1.3 only, and only with a fresh (EC)DHE. A server issues tickets it accepts for `seconds`,
+   sealed under in-memory keys it replaces as often; it then asks for no client certificate, since a resumed session
+   carries none (KTLS_ERR_INPUT, whichever is set first). A client keeps the tickets a server sends and offers none
+   older than `seconds`. 1 to 604800 seconds (seven days, RFC 8446's cap); a second call replaces the first. */
+int32_t ktls_config_session_tickets(ktls_config *c, int64_t seconds);
 int32_t ktls_config_trust_count(ktls_config *c);                                 /* CA certificates loaded */
 /* Certificate revocation lists: a PEM or DER file, or PEM/DER bytes; each call adds to the set. */
 int32_t ktls_config_crl_file(ktls_config *c, const char *path);
@@ -85,6 +90,7 @@ int32_t ktls_config_crl_complete(ktls_config *c, int32_t on);
 
 /* ---- session ------------------------------------------------------------------------------------------ */
 typedef struct ktls_session ktls_session;
+typedef struct ktls_ticket ktls_ticket;
 
 /* A client or a server session; retains the configuration. A client's `server_name` is sent as SNI, unless it
    is an IP literal (RFC 6066 forbids one), and full verification compares the certificate with it: a host name
@@ -105,6 +111,15 @@ int32_t ktls_read(ktls_session *s, uint8_t *buf, size_t cap);       /* > 0 bytes
                                                                        KTLS_TRUNCATED, or an error */
 int32_t ktls_write(ktls_session *s, const uint8_t *buf, size_t len); /* > 0 bytes accepted, or an error */
 int32_t ktls_close_notify(ktls_session *s);                         /* queue close_notify */
+
+/* A client's ticket (ktls_config_session_tickets), which arrives after the handshake, with a read. Taken once: NULL
+   when none has arrived since the last take. Offered to a later client session made through the same configuration
+   (or a handle on it) for the same server name, before its handshake; otherwise KTLS_ERR_INPUT. A ticket past its
+   lifetime, or one the server declines, gives a full handshake. Freeing it wipes the resumption secret. */
+ktls_ticket *ktls_ticket_take(ktls_session *s);
+int32_t ktls_session_resume_with(ktls_session *s, const ktls_ticket *t);
+void ktls_ticket_free(ktls_ticket *t);
+int32_t ktls_resumed(const ktls_session *s);   /* 1 once the handshake has resumed a session */
 
 /* ---- after (or during) the handshake ---------------------------------------------------------------------
    Each text or byte answer is copied into the caller's buffer, truncated to cap; the return value is the

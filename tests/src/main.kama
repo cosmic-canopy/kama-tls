@@ -3,7 +3,7 @@
 // in its own isolate — so they run anywhere `tools/test.sh` runs, debug and release. A failing case prints
 // its name, so the log says WHICH, not just that.
 import { core::println, tls::TlsError, tls::ready, tls::version, tls_tests::handshakeTests, tls_tests::streamTests, tls_tests::tcpTests, tls_tests::wordsTests, tls_tests::certificateTests, tls_tests::revocationTests, tls_tests::requestTests, tls_tests::identityTests, tls_tests::identitiesTests, tls_tests::keylogTests, tls_tests::sharedTests,
-         tls_tests::windowsTests };
+         tls_tests::windowsTests, tls_tests::resumptionTests };
 export { check, fail };
 
 fn int32 check(bool ok, string what) {
@@ -44,6 +44,7 @@ fn uint8 main() {
     failed = failed + identitiesTests();
     failed = failed + keylogTests();
     failed = failed + windowsTests();
+    failed = failed + resumptionTests();
     if (failed != 0) { println(s: "tls tests: ${failed} failed"); return 1; }
     string v = version();
     println(s: "tls tests: OK (Mbed TLS ${v})");

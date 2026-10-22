@@ -1,0 +1,25 @@
+export { TlsSession };
+
+// A TLS 1.3 session a client can resume: the ticket the server sent, the secret that goes with it, and the server's
+// certificate. Take one from a stream with `TlsStream.takeSession()`, and hand it to a later client stream with
+// `resumeWith(session:)` before that stream's handshake. It resumes only through the configuration it was made with
+// (or a `share()` of it), for the same server name.
+//
+// It lives in memory only. It cannot be saved as bytes, so the secret never becomes data a caller stores, and it is
+// wiped when it drops. It is used once (RFC 8446, appendix C.4: a client should not reuse a ticket), so `resumeWith`
+// takes it. It is `Sendable`, so a connection pool on another isolate can hold it.
+
+extern "ktls.h";
+extern fn void ktls_ticket_free(UnsafePtr t);
+
+type resource TlsSession implements Sendable {
+    UnsafePtr handle;
+
+    friend tls::TlsStream::takeSession[adopt];
+    friend tls::TlsStream::resumeWith[raw];
+
+    unsafe ctor adopt(UnsafePtr handle) { this.handle = handle; }
+    unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~TlsSession() { if (this.handle != null) { ktls_ticket_free(t: this.handle); } }
+}

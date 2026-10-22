@@ -1,5 +1,6 @@
 import { core::env, std::fs::exists, std::fs::readDir, std::io::IoError, std::collections::ConstView,
-         std::collections::DynamicArray, tls::TlsError, tls::TlsVersion, tls::Verify, tls::Revocation, tls::errorText, tls::ready };
+         std::collections::DynamicArray, std::time::Duration, tls::TlsError, tls::TlsVersion, tls::Verify, tls::Revocation,
+         tls::errorText, tls::ready };
 export { TlsConfig };
 
 // A TLS configuration: the role, what to trust, who this side is, how much to verify, which application
@@ -30,6 +31,7 @@ extern fn int32 ktls_config_private_key(UnsafePtr c, UnsafeConstPtr<uint8> data,
                                         usize password_len);
 extern fn int32 ktls_config_alpn(UnsafePtr c, UnsafeConstPtr<uint8> protocol, usize len);
 extern fn int32 ktls_config_versions(UnsafePtr c, int32 min, int32 max);
+extern fn int32 ktls_config_session_tickets(UnsafePtr c, int64 seconds);
 extern fn int32 ktls_config_trust_count(UnsafePtr c);
 extern fn int32 ktls_config_crl_file(UnsafePtr c, UnsafeConstPtr<cchar> path);
 extern fn int32 ktls_config_crl_pem(UnsafePtr c, UnsafeConstPtr<uint8> data, usize len);
@@ -137,13 +139,15 @@ type resource TlsConfig implements Sendable {
         return TlsConfig.adopt(handle: this.handle);
     }
 
+    // How much to verify of the peer's certificate. A server verifying its clients cannot also issue session tickets
+    // (`sessionTickets`).
     public unsafe fn Result<Unit, TlsError> verify(Verify mode) {
         int32 m = match (mode) { case None: 0; case Chain: 1; case Full: 2; };
         return checked(rc: ktls_config_verify(c: this.handle, mode: m));
     }
 
     // A server: ask the client for a certificate, but complete the handshake whatever it answers — none, or one
-    // that does not chain. (`verify(mode: Verify::Chain)` requires one that chains.)
+    // that does not chain. (`verify(mode: Verify::Chain)` requires one that chains.) Not with session tickets.
     public unsafe fn Result<Unit, TlsError> requestClientCertificate() {
         return checked(rc: ktls_config_verify(c: this.handle, mode: 3));
     }
@@ -228,6 +232,28 @@ type resource TlsConfig implements Sendable {
         int32 lo = match (min) { case Tls12: 771; case Tls13: 772; };
         int32 hi = match (max) { case Tls12: 771; case Tls13: 772; };
         return checked(rc: ktls_config_versions(c: this.handle, min: lo, max: hi));
+    }
+
+    // Session resumption (TLS 1.3): a later connection skips the certificate and its signature, though not a round
+    // trip. A resumed session always runs a fresh (EC)DHE key exchange, so it keeps forward secrecy. 0-RTT data is
+    // never sent or accepted. TLS 1.2 sessions do not resume.
+    //
+    // A server issues tickets and accepts each for `lifetime` after it issued it. The keys that seal them are random,
+    // held only in memory and replaced every `lifetime`, so a restart ends every ticket.
+    //
+    // A client keeps the tickets a server sends (`TlsStream.takeSession()`) and offers none older than `lifetime`,
+    // whatever the server allowed.
+    //
+    // A resumed session does not verify the certificate again, so revocation reaches it only after `lifetime`; keep it
+    // short. Two hours, OpenSSL's default session timeout, is a reasonable choice. The lifetime is whole seconds, from
+    // 1 second to 7 days (RFC 8446's cap); anything else is code -5.
+    //
+    // A server that verifies or asks for client certificates cannot issue tickets, whichever is set first (code -5):
+    // a resumed session carries no client certificate, so the server would not know its client.
+    //
+    // A second call replaces the first.
+    public unsafe fn Result<Unit, TlsError> sessionTickets(Duration lifetime) {
+        return checked(rc: ktls_config_session_tickets(c: this.handle, seconds: lifetime.asSecs()));
     }
 
     // Check the peer's chain against the certificate revocation lists in a PEM or DER file. Each call adds to the

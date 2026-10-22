@@ -5,6 +5,6 @@
   "kama": ">=0.9.690",
   "entry": "src/main.kama",
   "dependencies": { "@kama/tls": { "path": ".." } },
-  "csources": [{ "path": "csrc/windows_roots.c", "compileFor": ["OS_WINDOWS"] }],
+  "csources": [{ "path": "csrc/windows_roots.c", "compileFor": ["OS_WINDOWS"] }, "csrc/raw_client.c"],
   "modules": { ".": { "visibility": "internal" } }
 }

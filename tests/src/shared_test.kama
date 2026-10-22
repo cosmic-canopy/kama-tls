@@ -46,9 +46,9 @@ type resource SetterJob implements Sendable {
         _ = this.report.send(item: v);
     }
     // Every setter once a round: the versions, the verify mode, the CRL rule, the trust chain and the CRLs, and in
-    // the loading rounds an identity and an ALPN name. None of them changes what a handshake does: the server
-    // verifies no client, and every identity names localhost. 0, what `judge` said, or 20 when no session froze
-    // the configuration.
+    // the loading rounds an identity, an ALPN name and session tickets (which make ticket keys, so they load too).
+    // None of them changes what a handshake does: the server verifies no client, every identity names localhost, and
+    // the client asks for no ticket. 0, what `judge` said, or 20 when no session froze the configuration.
     fn int32 rounds() {
         string ca = certPath(name: "ca.crt");
         string crl = certPath(name: "empty.crl");
@@ -71,6 +71,7 @@ type resource SetterJob implements Sendable {
             if (bad == 0) { bad = judge(r: this.config.revocation(mode: Revocation::Listed), step: 5, frozen: frozen); }
             if (bad == 0) { bad = judge(r: this.config.verify(mode: Verify::None), step: 6, frozen: frozen); }
             if (bad == 0) { bad = judge(r: this.config.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls13), step: 7, frozen: frozen); }
+            if (bad == 0 && loading) { bad = judge(r: this.config.sessionTickets(lifetime: Duration.fromSecs(s: 3600i64)), step: 8, frozen: frozen); }
             if (bad != 0) { return bad; }
             if (frozen) { after = after + 1; }
             n = n + 1;

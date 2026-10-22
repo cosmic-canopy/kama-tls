@@ -21,6 +21,10 @@
 /* TLS 1.2 renegotiation has a long history of attacks, and nothing this package serves needs it. */
 #undef MBEDTLS_SSL_RENEGOTIATION
 
+/* A TLS 1.3 session resumes only with a fresh (EC)DHE key exchange (psk_dhe_ke), so a resumed session keeps forward
+   secrecy. Pure-PSK resumption (psk_ke) is compiled out, so no configuration can offer or accept it. */
+#undef MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_ENABLED
+
 /* Not used by TLS: PKCS#7 containers, writing certificates and CSRs, and serialising a live session. Test
    certificates come from the openssl CLI (tools/gen-certs.sh). */
 #undef MBEDTLS_PKCS7_C

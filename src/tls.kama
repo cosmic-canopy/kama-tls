@@ -9,6 +9,7 @@ export { TlsError, TlsVersion, Verify, Revocation, Progress, ready, version, err
 //                  every protocol written against the contract runs over TLS unchanged
 //   TlsConfig      trust roots, identity, verification mode, ALPN, protocol versions — built once, shared by
 //                  every session made from it, on any isolate
+//   TlsSession     a client's TLS 1.3 session, kept in memory to resume a later connection with
 //
 // The rules every module holds:
 //   - Kama does all the socket I/O. Mbed TLS reads and writes memory buffers (a memory BIO), and kama moves

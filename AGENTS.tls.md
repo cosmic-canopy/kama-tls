@@ -31,13 +31,15 @@ maintainer's word.
   `csrc/ktls_crypto_user_config.h`. That works because kama 0.9.473 passes each flag as one argument. Each
   `#undef`/`#define` there carries its reason, and a change to the configuration is a change to those
   two files. Threading is on for every target (isolates are OS threads: pthreads, and winpthreads on Windows);
-  DTLS, renegotiation, socket I/O and persistent key storage are off.
+  DTLS, renegotiation, socket I/O, persistent key storage and pure-PSK TLS 1.3 resumption (psk_ke) are off.
 - **The C this package writes is glue only** (`csrc/ktls.c`):
   - a once-guard over `psa_crypto_init`;
   - the memory-BIO session (phase 2);
   - error text into a caller buffer;
   - the RFC 5929 end-point hash and the RFC 9266 tls-exporter value;
   - the SNI callback that chooses among a server's identities (`ktls_sni_seen`);
+  - session tickets: the ticket callbacks around `ssl_ticket.c` (`ktls_issue_ticket`, `ktls_accept_ticket`), and a
+    client's kept ticket (`ktls_ticket`, `ktls_keep_ticket`, `ktls_session_resume_with`);
   - the file loader behind every file-based setter (`ktls_load_file`), which opens a UTF-8 path as UTF-16 on Windows;
   - on Windows, the import of the certificate store's roots (`ktls_config_trust_windows`, `ktls_win_root_kept`);
   - a `_Static_assert` per size kama spells as a literal.
@@ -54,6 +56,24 @@ maintainer's word.
   and `MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY` for an orderly end. `ktls_read` turns those into `KTLS_TRUNCATED`
   (→ an `UnexpectedEof` IoError) and `KTLS_CLOSED` (→ 0 bytes). Getting this backwards silently turns a
   truncation into a clean EOF; the truncation test guards it.
+- **A TLS 1.3 client's read holds a NewSessionTicket before it processes it.** `mbedtls_ssl_read` answers WANT_READ
+  with the record held, and only the next read or write processes it (`RECEIVED_NEW_SESSION_TICKET`). So `ktls_read`
+  goes round again on WANT_READ while a record is held or fed bytes remain, and `ktls_write` writes again after a
+  ticket. Before 0.1.8 a read could wait on the transport for bytes it held; `heldTicketTests` guards it.
+- **A TLS 1.3 server's NewSessionTicket comes after `MBEDTLS_SSL_HANDSHAKE_OVER`** in Mbed TLS's state order, so the
+  step loop in `ktls_handshake` stops before it, and a server finishes with one `mbedtls_ssl_handshake` call. The same
+  loop records what Mbed TLS keeps only in its handshake state: whether the server asked for a certificate, and
+  whether the handshake resumed.
+- **A client's session is bound by ktls, not by Mbed TLS.** Mbed TLS compares a ticket's host name with `strcmp`,
+  fails the handshake on a mismatch, and takes two sessions with no name (an IP literal, or none) as a match. So
+  `ktls_session_resume_with` checks the configuration's id (a process-wide counter, never the pointer) and the name
+  first. A configuration is frozen once a session is made from it, so the same id means the same trust and modes.
+- **The ticket callbacks see the ticket context, not the session**, and Mbed TLS uses one pair for TLS 1.2 and 1.3.
+  So `ktls_handshake` keeps the session it is stepping in a thread-local (`ktls_stepping`), and `ktls_accept_ticket`
+  takes a ticket only in a TLS 1.3 handshake, for a TLS 1.3 session. Phase 10 (TLS 1.2 resumption) extends these two
+  callbacks.
+- **`tests/csrc/raw_client.c` is a raw Mbed TLS client** run against a ktls server session through `ktls.h`'s buffer
+  API, for ClientHellos the package's own client never sends. It is built for every target.
 - **Mbed TLS 4 refuses a verifying client whose hostname was never set, but an explicit
   `mbedtls_ssl_set_hostname(NULL)` means "verify without a name".** So `Verify::Chain` (libpq's verify-ca) takes
   an empty server name: no SNI, no name compared. Given a name, it sends SNI, and a verify callback clears only

@@ -2,9 +2,9 @@
    moves the bytes. Nothing here allocates on the hot path except to grow those two buffers. */
 
 /* The RFC 5929 end-point hash needs the certificate's signature hash, which Mbed TLS 4 keeps in a private
-   field, and whether a server asked for a client certificate is known only to the private handshake state
-   (ssl_misc.h, on the include path because kama puts every C source directory there). This file, and only this
-   file, reads them. */
+   field, and whether a server asked for a client certificate, or a handshake resumed a session, is known only to
+   the private handshake state (ssl_misc.h, on the include path because kama puts every C source directory there).
+   So are a session's version and its ticket's lifetime. This file, and only this file, reads them. */
 #define MBEDTLS_ALLOW_PRIVATE_ACCESS
 
 #include "ktls.h"
@@ -23,6 +23,7 @@
 #include <mbedtls/platform_util.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/ssl_ciphersuites.h>
+#include <mbedtls/ssl_ticket.h>
 #include <mbedtls/threading.h>
 #include <mbedtls/version.h>
 #include <mbedtls/x509_crl.h>
@@ -42,6 +43,19 @@
 /* tlsExporter() (RFC 9266) is mbedtls_ssl_export_keying_material: a configuration without it has no binding. */
 #if !defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT)
 #error "MBEDTLS_SSL_KEYING_MATERIAL_EXPORT is off: TlsStream.tlsExporter() (RFC 9266 tls-exporter) needs it"
+#endif
+
+/* Session resumption (TlsConfig.sessionTickets) is TLS 1.3 tickets with a fresh (EC)DHE. Never 0-RTT data, which an
+   attacker can replay, and never pure PSK, which gives up forward secrecy (ktls_mbedtls_user_config.h). */
+#if defined(MBEDTLS_SSL_EARLY_DATA)
+#error "MBEDTLS_SSL_EARLY_DATA is on: 0-RTT data can be replayed, and @kama/tls neither sends nor accepts it"
+#endif
+#if defined(MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_ENABLED)
+#error "MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_ENABLED is on: a resumed session must keep forward secrecy (psk_dhe_ke only)"
+#endif
+#if !defined(MBEDTLS_SSL_SESSION_TICKETS) || !defined(MBEDTLS_SSL_TICKET_C) || !defined(MBEDTLS_HAVE_TIME) || \
+    !defined(MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_EPHEMERAL_ENABLED)
+#error "TlsConfig.sessionTickets needs MBEDTLS_SSL_SESSION_TICKETS, MBEDTLS_SSL_TICKET_C, MBEDTLS_HAVE_TIME and psk_dhe_ke"
 #endif
 
 /* ---- process setup -------------------------------------------------------------------------------------- */
@@ -70,8 +84,15 @@ static size_t ktls_copy_out(const void *src, size_t len, uint8_t *buf, size_t ca
 /* ---- configuration -------------------------------------------------------------------------------------- */
 
 static int ktls_sni_seen(void *ctx, mbedtls_ssl_context *ssl, const unsigned char *name, size_t len);
+static int ktls_issue_ticket(void *p, const mbedtls_ssl_session *session, unsigned char *start, const unsigned char *end,
+                             size_t *tlen, uint32_t *lifetime);
+static int ktls_accept_ticket(void *p, mbedtls_ssl_session *session, unsigned char *buf, size_t len);
 
 #define KTLS_MAX_ALPN 8
+
+/* A configuration's id, never reused in the process: a client's ticket is bound to the configuration it was made
+   through, and an address can be reused. */
+static _Atomic uint64_t ktls_config_ids = 0;
 
 /* One identity: a certificate chain and the private key that pairs with its first certificate. A server may hold
    several, in the order they were loaded, and serves each handshake the one whose certificate names the host the
@@ -100,6 +121,9 @@ struct ktls_config {
     ktls_identity *pending;       /* a chain loaded by certificate_chain, waiting for its key */
     char *alpn[KTLS_MAX_ALPN + 1];  /* NULL-terminated, as mbedtls_ssl_conf_alpn_protocols wants */
     int32_t alpn_count;
+    uint64_t id;                  /* from ktls_config_ids */
+    uint32_t ticket_lifetime;     /* seconds; 0 until ktls_config_session_tickets */
+    mbedtls_ssl_ticket_context tickets;   /* a server's ticket keys; ssl_ticket.c locks its own state */
 };
 
 /* Called by Mbed TLS for each certificate of the chain it built, the trust anchor included, with that
@@ -149,11 +173,13 @@ ktls_config *ktls_config_new(int32_t server)
     mbedtls_mutex_init(&c->lock);
 #endif
     atomic_init(&c->refs, 1);
+    c->id = atomic_fetch_add_explicit(&ktls_config_ids, 1, memory_order_relaxed) + 1;
     c->server = server ? 1 : 0;
     c->verify = server ? 0 : 2;   /* a client verifies chain and name unless told otherwise */
     mbedtls_ssl_config_init(&c->conf);
     mbedtls_x509_crt_init(&c->trust);
     mbedtls_x509_crl_init(&c->crl);
+    mbedtls_ssl_ticket_init(&c->tickets);
     if (mbedtls_ssl_config_defaults(&c->conf, c->server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
                                     MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
         ktls_config_release(c);
@@ -161,6 +187,12 @@ ktls_config *ktls_config_new(int32_t server)
     }
     ktls_config_apply_verify(c);
     if (c->server) mbedtls_ssl_conf_sni(&c->conf, ktls_sni_seen, NULL);
+    /* TLS 1.3 resumes only with a fresh (EC)DHE. A client offers no PSK mode at all until it opts in to tickets
+       (ktls_config_session_tickets), so servers send it none; and it asks for no TLS 1.2 ticket, because TLS 1.2
+       resumption is not offered. */
+    mbedtls_ssl_conf_tls13_key_exchange_modes(&c->conf, c->server ? MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL_ALL
+                                                                   : MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL);
+    if (!c->server) mbedtls_ssl_conf_session_tickets(&c->conf, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
     return c;
 }
 
@@ -193,6 +225,7 @@ void ktls_config_release(ktls_config *c)
     for (ktls_identity *id = c->identities; id != NULL;) { ktls_identity *next = id->next; ktls_identity_free(id); id = next; }
     ktls_identity_free(c->pending);
     for (int32_t i = 0; i < c->alpn_count; i++) free(c->alpn[i]);
+    mbedtls_ssl_ticket_free(&c->tickets);
 #if defined(MBEDTLS_THREADING_C)
     mbedtls_mutex_free(&c->lock);
 #endif
@@ -244,6 +277,8 @@ static int32_t ktls_change_end(ktls_config *c, int32_t rc)
 static int32_t ktls_config_verify_locked(ktls_config *c, int32_t mode)
 {
     if (mode < 0 || mode > 3 || (mode == 3 && !c->server)) return KTLS_ERR_INPUT;
+    /* A server that issues tickets asks for no client certificate (ktls_config_session_tickets says why). */
+    if (c->server && mode != 0 && c->ticket_lifetime != 0) return KTLS_ERR_INPUT;
     c->verify = mode;
     ktls_config_apply_verify(c);
     return 0;
@@ -686,6 +721,44 @@ int32_t ktls_config_versions(ktls_config *c, int32_t min, int32_t max)
     return rc != 0 ? rc : ktls_change_end(c, ktls_config_versions_locked(c, min, max));
 }
 
+/* Session resumption, TLS 1.3 only.
+
+   A server issues tickets sealed under random AES-256-GCM keys that live only in memory, and accepts one for
+   `seconds` after it issued it. ssl_ticket.c replaces the key every `seconds` and keeps the one before for another
+   period, so a ticket stays readable for its whole lifetime. A server that issues tickets asks for no client
+   certificate: Mbed TLS's TLS 1.3 ticket holds no peer certificate, so a resumed session would not know its client.
+
+   A client advertises psk_dhe_ke from here on, keeps the tickets a server sends (ktls_keep_ticket), and offers none
+   older than `seconds`, whatever lifetime the server gave it.
+
+   RFC 8446 (section 4.6.1) caps a ticket's lifetime at seven days, and Mbed TLS refuses to send a longer one. A second
+   call replaces the first; setting the ticket context up again would leak its keys, so it is freed first. */
+static int32_t ktls_config_session_tickets_locked(ktls_config *c, int64_t seconds)
+{
+    if (seconds < 1 || seconds > MBEDTLS_SSL_TLS1_3_MAX_ALLOWED_TICKET_LIFETIME) return KTLS_ERR_INPUT;
+    if (!c->server) {
+        c->ticket_lifetime = (uint32_t)seconds;
+        mbedtls_ssl_conf_tls13_key_exchange_modes(&c->conf, MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL_ALL);
+        return 0;
+    }
+    if (c->verify != 0) return KTLS_ERR_INPUT;
+    mbedtls_ssl_conf_session_tickets_cb(&c->conf, NULL, NULL, NULL);
+    c->ticket_lifetime = 0;
+    mbedtls_ssl_ticket_free(&c->tickets);
+    mbedtls_ssl_ticket_init(&c->tickets);
+    int rc = mbedtls_ssl_ticket_setup(&c->tickets, PSA_ALG_GCM, PSA_KEY_TYPE_AES, 256, (uint32_t)seconds);
+    if (rc != 0) return rc;
+    c->ticket_lifetime = (uint32_t)seconds;
+    mbedtls_ssl_conf_session_tickets_cb(&c->conf, ktls_issue_ticket, ktls_accept_ticket, &c->tickets);
+    return 0;
+}
+
+int32_t ktls_config_session_tickets(ktls_config *c, int64_t seconds)
+{
+    int32_t rc = ktls_change_begin(c);
+    return rc != 0 ? rc : ktls_change_end(c, ktls_config_session_tickets_locked(c, seconds));
+}
+
 /* 0 also when the lock cannot be taken: a count, not a verdict. */
 int32_t ktls_config_trust_count(ktls_config *c)
 {
@@ -718,7 +791,23 @@ struct ktls_session {
     ktls_buffer keylog;       /* NSS key-log lines not yet taken (ktls_session_keylog) */
     unsigned char ip[16];     /* a client given an IP literal as its server name: the address, 4 or 16 bytes */
     size_t ip_len;            /* 0 when the server name is not an IP literal */
+    char *name;               /* a client: its server name as given, "" for none; what its tickets are bound to */
+    ktls_ticket *ticket;      /* a client: the latest ticket the server sent, until it is taken */
+    int32_t resumed;          /* the handshake resumed a session */
 };
+
+/* What a client keeps to resume: Mbed TLS's session (the ticket, the resumption secret, the server's certificate),
+   the configuration it was made through, and the server name it was made for. */
+struct ktls_ticket {
+    mbedtls_ssl_session session;
+    uint64_t config_id;
+    char *name;
+};
+
+/* The session this thread is running a handshake step for. Mbed TLS hands the ticket callbacks the ticket context, not
+   the session, and ktls_accept_ticket needs the handshake's version. It reads a ClientHello only inside
+   ktls_handshake, since renegotiation is compiled out. */
+static _Thread_local ktls_session *ktls_stepping;
 
 /* Whether the certificate carries `ip` (4 or 16 bytes) as an iPAddress subject alternative name. Only an IP SAN
    counts, as in OpenSSL's X509_check_ip and Go's crypto/x509: neither a DNS SAN nor the common name names an
@@ -824,6 +913,26 @@ static int ktls_sni_seen(void *ctx, mbedtls_ssl_context *ssl, const unsigned cha
     return rc;
 }
 
+/* A server seals a ticket only for a TLS 1.3 session. TLS 1.2 resumption is not offered yet. A TLS 1.2 server whose
+   ticket callback declines sends an empty ticket, as RFC 5077 allows. */
+static int ktls_issue_ticket(void *p, const mbedtls_ssl_session *session, unsigned char *start, const unsigned char *end,
+                             size_t *tlen, uint32_t *lifetime)
+{
+    if (session->tls_version != MBEDTLS_SSL_VERSION_TLS1_3) return MBEDTLS_ERR_SSL_FEATURE_UNAVAILABLE;
+    return mbedtls_ssl_ticket_write(p, session, start, end, tlen, lifetime);
+}
+
+/* And it opens one only in a TLS 1.3 handshake, for a TLS 1.3 session: no ticket is accepted in a TLS 1.2 handshake.
+   A ticket it declines is not an error; the handshake goes on without resuming. */
+static int ktls_accept_ticket(void *p, mbedtls_ssl_session *session, unsigned char *buf, size_t len)
+{
+    const ktls_session *s = ktls_stepping;
+    if (s == NULL || s->ssl.tls_version != MBEDTLS_SSL_VERSION_TLS1_3) return MBEDTLS_ERR_SSL_INVALID_MAC;
+    int rc = mbedtls_ssl_ticket_parse(p, session, buf, len);
+    if (rc == 0 && session->tls_version != MBEDTLS_SSL_VERSION_TLS1_3) rc = MBEDTLS_ERR_SSL_INVALID_MAC;
+    return rc;
+}
+
 static int ktls_buffer_append(ktls_buffer *b, const uint8_t *src, size_t len)
 {
     if (len == 0) return 0;
@@ -911,6 +1020,12 @@ ktls_session *ktls_session_new(ktls_config *c, const char *server_name, int32_t 
     if (rc == 0 && !c->server && has_name) s->ip_len = mbedtls_x509_crt_parse_cn_inet_pton(server_name, s->ip);
     if (rc == 0 && !c->server) rc = mbedtls_ssl_set_hostname(&s->ssl, has_name && s->ip_len == 0 ? server_name : NULL);
     if (rc == 0 && s->ip_len > 0) mbedtls_ssl_set_verify(&s->ssl, ktls_verify_ip_cb, s);
+    if (rc == 0 && !c->server) {
+        size_t n = has_name ? strlen(server_name) : 0;
+        s->name = malloc(n + 1);
+        if (s->name == NULL) rc = KTLS_ERR_NOMEM;
+        else { if (n > 0) memcpy(s->name, server_name, n); s->name[n] = 0; }
+    }
     if (rc != 0) { *err = rc; ktls_session_free(s); return NULL; }
     mbedtls_ssl_set_bio(&s->ssl, s, ktls_bio_send, ktls_bio_recv, NULL);
     return s;
@@ -925,6 +1040,8 @@ void ktls_session_free(ktls_session *s)
     ktls_buffer_free(&s->keylog);
     ktls_config_release(s->config);
     free(s->sni);
+    free(s->name);
+    ktls_ticket_free(s->ticket);
     free(s);
 }
 
@@ -952,19 +1069,56 @@ void ktls_out_consume(ktls_session *s, size_t n)
     if (s->out.start == s->out.end) s->out.start = s->out.end = 0;
 }
 
+/* Whether the handshake so far resumes a session: under TLS 1.3 a PSK key exchange (any, so that a pure-PSK one could
+   not pass for a full handshake), under TLS 1.2 Mbed TLS's resume flag, which a client clears when the server does
+   not resume. */
+static int32_t ktls_resuming(ktls_session *s)
+{
+    if (s->ssl.tls_version == MBEDTLS_SSL_VERSION_TLS1_3) return mbedtls_ssl_tls13_key_exchange_mode_with_psk(&s->ssl) != 0;
+    return s->ssl.handshake->resume != 0;
+}
+
 /* mbedtls_ssl_handshake is a loop over mbedtls_ssl_handshake_step; it is run here a step at a time, so that
-   between steps a client can note a CertificateRequest, which Mbed TLS keeps only in its handshake state and
-   frees when the handshake ends. */
+   between steps a client can note a CertificateRequest, and either side whether the handshake resumed, both of which
+   Mbed TLS keeps only in its handshake state and may free when the handshake ends. A TLS 1.3 server's
+   NewSessionTicket comes after the step Mbed TLS counts as the end, so a server finishes with mbedtls_ssl_handshake,
+   which sends it and answers at once when there is nothing left to do. */
 int32_t ktls_handshake(ktls_session *s)
 {
     int rc = 0;
+    ktls_stepping = s;
     while (!mbedtls_ssl_is_handshake_over(&s->ssl)) {
         rc = mbedtls_ssl_handshake_step(&s->ssl);
-        if (!s->config->server && s->ssl.handshake != NULL && s->ssl.handshake->client_auth) s->cert_requested = 1;
+        if (s->ssl.handshake != NULL) {
+            if (!s->config->server && s->ssl.handshake->client_auth) s->cert_requested = 1;
+            s->resumed = ktls_resuming(s);
+        }
         if (rc != 0) break;
     }
+    if (rc == 0 && s->config->server) rc = mbedtls_ssl_handshake(&s->ssl);
+    ktls_stepping = NULL;
     if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return KTLS_WANT_READ;
     return rc;
+}
+
+/* A client that opted in keeps the ticket a server just sent, bound to this configuration and server name. Its
+   lifetime is cut to the configuration's, so Mbed TLS will not offer it once that has passed. The latest replaces
+   any earlier one; RFC 8446 (appendix C.4) has a client use a ticket once anyway. Failing to keep one costs a full
+   handshake later, never this connection. */
+static void ktls_keep_ticket(ktls_session *s)
+{
+    if (s->config->server || s->config->ticket_lifetime == 0) return;
+    ktls_ticket *t = calloc(1, sizeof *t);
+    if (t == NULL) return;
+    mbedtls_ssl_session_init(&t->session);
+    size_t n = strlen(s->name);
+    t->name = malloc(n + 1);
+    if (t->name == NULL || mbedtls_ssl_get_session(&s->ssl, &t->session) != 0) { ktls_ticket_free(t); return; }
+    memcpy(t->name, s->name, n + 1);
+    if (t->session.ticket_lifetime > s->config->ticket_lifetime) t->session.ticket_lifetime = s->config->ticket_lifetime;
+    t->config_id = s->config->id;
+    ktls_ticket_free(s->ticket);
+    s->ticket = t;
 }
 
 int32_t ktls_cert_requested(const ktls_session *s) { return s->cert_requested; }
@@ -1041,16 +1195,25 @@ size_t ktls_sni(const ktls_session *s, uint8_t *buf, size_t cap)
     return s->sni == NULL ? 0 : ktls_copy_out(s->sni, strlen(s->sni), buf, cap);
 }
 
+/* A TLS 1.3 client's read meets the server's NewSessionTicket. Mbed TLS reads that record, holds it, and answers
+   WANT_READ before looking at it; the next call into Mbed TLS processes it and answers RECEIVED_NEW_SESSION_TICKET.
+   Neither needs the transport, and what the server sent after the ticket may be fed already. So on WANT_READ the
+   read goes round again while that makes progress (a record held, or fed bytes the engine has not taken), rather than
+   sending the caller to wait on a transport that may have nothing more to give. */
 int32_t ktls_read(ktls_session *s, uint8_t *buf, size_t cap)
 {
     if (cap > 0x7fffffff) cap = 0x7fffffff;
+    size_t mark = SIZE_MAX;   /* fed bytes left the last time round on WANT_READ */
     for (;;) {
         int rc = mbedtls_ssl_read(&s->ssl, buf, cap);
         if (rc > 0) return rc;
-        if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return KTLS_WANT_READ;
+        if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            size_t fed = s->in.end - s->in.start;
+            if ((mbedtls_ssl_check_pending(&s->ssl) || fed > 0) && fed < mark) { mark = fed; continue; }
+            return KTLS_WANT_READ;
+        }
         if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) return KTLS_CLOSED;
-        /* TLS 1.3 post-handshake messages surface as this; it carries no application data. */
-        if (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
+        if (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) { ktls_keep_ticket(s); mark = SIZE_MAX; continue; }
         /* mbedtls_ssl_read answers 0 when the transport ended WITHOUT a close_notify (its documented
            contract), and CONN_EOF when that happens mid-record. Both are truncations. */
         if (rc == 0 || rc == MBEDTLS_ERR_SSL_CONN_EOF) return KTLS_TRUNCATED;
@@ -1058,10 +1221,16 @@ int32_t ktls_read(ktls_session *s, uint8_t *buf, size_t cap)
     }
 }
 
+/* A ticket a read left held is processed by the next call into Mbed TLS, which may be a write: keep it, and write
+   again. */
 int32_t ktls_write(ktls_session *s, const uint8_t *buf, size_t len)
 {
     if (len > 0x7fffffff) len = 0x7fffffff;
     int rc = mbedtls_ssl_write(&s->ssl, buf, len);
+    while (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
+        ktls_keep_ticket(s);
+        rc = mbedtls_ssl_write(&s->ssl, buf, len);
+    }
     if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return KTLS_WANT_READ;
     return rc;
 }
@@ -1072,6 +1241,39 @@ int32_t ktls_close_notify(ktls_session *s)
     if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return KTLS_WANT_READ;
     return rc;
 }
+
+/* ---- resumption ----------------------------------------------------------------------------------------- */
+
+ktls_ticket *ktls_ticket_take(ktls_session *s)
+{
+    ktls_ticket *t = s->ticket;
+    s->ticket = NULL;
+    return t;
+}
+
+void ktls_ticket_free(ktls_ticket *t)
+{
+    if (t == NULL) return;
+    mbedtls_ssl_session_free(&t->session);   /* wipes the resumption secret */
+    free(t->name);
+    mbedtls_platform_zeroize(t, sizeof *t);
+    free(t);
+}
+
+/* Mbed TLS compares a ticket's host name with the session's, but it fails the handshake on a mismatch, and it takes two
+   sessions given no name (an IP literal, or none at all) as a match. So the binding is checked here, before the ticket
+   is offered. The configuration is frozen once a session is made from it, so the same configuration means the same
+   trust, verification, versions and key-exchange modes; the name compares byte for byte, as Mbed TLS's does. */
+int32_t ktls_session_resume_with(ktls_session *s, const ktls_ticket *t)
+{
+    if (s->config->server || t == NULL) return KTLS_ERR_INPUT;
+    if (s->ssl.state != MBEDTLS_SSL_HELLO_REQUEST || s->ssl.handshake == NULL || s->ssl.handshake->resume) return KTLS_ERR_INPUT;
+    if (t->config_id != s->config->id || strcmp(t->name, s->name) != 0) return KTLS_ERR_INPUT;
+    if (t->session.tls_version != MBEDTLS_SSL_VERSION_TLS1_3) return KTLS_ERR_INPUT;
+    return mbedtls_ssl_set_session(&s->ssl, &t->session);
+}
+
+int32_t ktls_resumed(const ktls_session *s) { return s->resumed; }
 
 /* ---- after the handshake -------------------------------------------------------------------------------- */
 

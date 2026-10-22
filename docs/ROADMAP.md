@@ -13,16 +13,21 @@ holds several identities and chooses one per handshake by SNI (phase 5); 0.1.5 (
 configurations fixed (phase 6); 0.1.6 (2026-10-20), builds on kama 0.9.690 and later, and its tests need 0.9.690;
 0.1.7 (2026-10-22), Windows (phase 7), which raises the floor to 0.9.690.
 
-Phase 7 left two runs for the Mac, neither of which blocks the next phase. The POSIX paths changed only in the file
-loader (`ktls_load_file`), and CI's Linux x86-64 and macOS arm64 legs cover them.
-- the gate on macOS arm64 and Linux aarch64 with the dev compiler;
-- `tools/tsan.sh`.
+0.1.8 is TLS 1.3 session resumption (phase 9), built and gated on the Windows machine on 2026-10-22. It also fixes a
+client read that could wait on the transport for bytes it held, against any server that sends TLS 1.3 tickets. The
+maintainer publishes it from the registry project on the other machine once CI is green; the CHANGELOG heading then
+takes the date.
 
-**Next: session resumption on TLS 1.3 (phase 9) on the Windows machine, and WebAssembly (phase 8) on the Mac.** The
-maintainer moved phase 8 to the Mac on 2026-10-22. It needs emcc and node, which the Mac's `kama-dev` container has
-and the Windows machine does not, and kama has never built for wasm on a Windows host. Phase 9 is the same on every
-platform, so it goes first. Then come resumption on TLS 1.2 (phase 10) and bare metal (phase 11, questions first). The
-maintainer settled the scope questions on 2026-10-18; the decisions are recorded in each section.
+Phases 7 and 9 leave three runs for the Mac, none of which blocks the next phase. CI's Linux x86-64 and macOS arm64
+legs cover the POSIX paths.
+- the gate on macOS arm64 and Linux aarch64 with the dev compiler;
+- `tools/tsan.sh`, which phase 9's ticket context, shared by isolates, adds to.
+
+**Next: WebAssembly (phase 8) on the Mac.** The maintainer moved phase 8 to the Mac on 2026-10-22. It needs emcc and
+node, which the Mac's `kama-dev` container has and the Windows machine does not, and kama has never built for wasm on a
+Windows host. Phase 9 is the same on every platform, so it went first, on Windows. Then come resumption on TLS 1.2
+(phase 10) and bare metal (phase 11, questions first). The maintainer settled the scope questions on 2026-10-18 and
+2026-10-22; the decisions are recorded in each section.
 
 | # | phase | state |
 |---|---|---|
@@ -36,7 +41,7 @@ maintainer settled the scope questions on 2026-10-18; the decisions are recorded
 | 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **done** (0.1.5, 2026-10-19) |
 | 7 | Windows; see [Platforms](#platforms) | **done** (0.1.7, 2026-10-22) |
 | 8 | WebAssembly (`--target WASM`), the wasm leg `AGENTS.package.md` asks of a package that vendors C; see [Platforms](#platforms) | **next, on the Mac** |
-| 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | **in progress** (on Windows) |
+| 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | **done** (0.1.8, unpublished) |
 | 10 | Session resumption on TLS 1.2; see [Session resumption](#session-resumption) | planned |
 | 11 | Bare metal (`--target EMBEDDED`); see [Platforms](#platforms) | planned, questions first |
 | 12 | `trustSystem()` chains verified by the operating system, on Windows and macOS; see [OS verification](#os-verification) | planned, design first |
@@ -161,16 +166,14 @@ would have to be 0.2.0.
 
 ## Session resumption
 
-Phases 9 (TLS 1.3) and 10 (TLS 1.2). Neither side resumes a session today. Build each the way phases 4 and 5 were
-built: a design in this section, tests in `tests/`, the gate on every platform the package then supports, and one
-version per phase.
+Phases 9 (TLS 1.3, **done**, 0.1.8) and 10 (TLS 1.2). Each is built the way phases 4 and 5 were built: a design in this
+section, tests in `tests/`, the gate on every platform the package then supports, and one version per phase.
 
 **Decided (the maintainer, 2026-10-18).**
 - **Both versions, as production TLS stacks resume both** (OpenSSL, Go, rustls). TLS 1.3 comes first; TLS 1.2
   follows as its own phase. Neither has a security reason to leave out, given the two rules below.
 - **TLS 1.3 resumes only with a fresh (EC)DHE** (psk_dhe_ke), so a resumed session keeps forward secrecy. Pure PSK
-  (psk_ke) is never accepted or offered: `mbedtls_ssl_conf_tls13_key_exchange_modes` is set without
-  `MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK`.
+  (psk_ke) is never accepted or offered.
 - **TLS 1.2 resumes only a session made with extended master secret** (RFC 7627), which shuts out the
   triple-handshake attack. Mbed TLS negotiates EMS by default (`MBEDTLS_SSL_EXTENDED_MASTER_SECRET`) but has no
   "required" switch, so ktls enforces it. It neither issues nor accepts a ticket, and caches no session ID, for a
@@ -182,50 +185,149 @@ version per phase.
     for clients that send no ticket.
 - **A client's `TlsSession` lives in memory only.** It is not saved to bytes, so the resumption secret never becomes
   data a caller stores.
-- **Still open, for the phase 9 session to propose and the maintainer to confirm:** the default ticket lifetime and
-  key rotation, and whether a caller can set them. Reference points: Go rotates its ticket keys daily and accepts a
-  ticket for up to 7 days, and nginx's session timeout defaults to 5 minutes. Keep it short, because a resumed session
-  is not re-verified.
 
-**What the vendored Mbed TLS 4.1.1 has.** Our configuration keeps upstream's defaults for all of this:
-- `MBEDTLS_SSL_SESSION_TICKETS`, `MBEDTLS_SSL_TICKET_C` and `MBEDTLS_SSL_CACHE_C` are on, and `ssl_ticket.c` and
-  `ssl_cache.c` are compiled.
-- All three TLS 1.3 key-exchange modes are on: ephemeral, psk and psk_ephemeral.
-- `MBEDTLS_SSL_EARLY_DATA` is off.
-- The server sets no ticket callbacks (`mbedtls_ssl_conf_session_tickets_cb`), so it issues no tickets.
-- The TLS 1.3 client never enables `mbedtls_ssl_conf_tls13_enable_signal_new_session_tickets`, so it discards the
-  NewSessionTicket messages it receives.
+**Decided (the maintainer, 2026-10-22), for phase 9.**
+- **The caller states the lifetime**, explicitly: `sessionTickets(lifetime:)`, whole seconds from 1 to 604800 (7 days,
+  RFC 8446 §4.6.1's cap, which Mbed TLS also enforces). The API comment suggests 2 hours, OpenSSL's default session
+  timeout. Mbed TLS ties key rotation to the lifetime, so there is no second knob. The references were Go (keys rotated
+  daily, tickets accepted for 7 days), nginx (a 5-minute session timeout) and OpenSSL (2 hours).
+- **A client opts in**, with the same setter on its configuration. Without it, the client advertises no PSK mode, so a
+  server sends it no ticket and it holds no resumption secret.
+- **A session from another configuration or for another name is refused**: `resumeWith` answers -5 rather than quietly
+  running a full handshake, so a wrongly keyed pool shows up at once. An expired ticket is not a mismatch; it gives a
+  full handshake, which `resumed()` reports.
+- **A server that verifies or asks for client certificates cannot issue tickets** (-5, whichever is set first).
+  Mbed TLS 4.1.1's TLS 1.3 ticket holds no peer certificate, so a resumed server stream would not know its client.
+  OpenSSL, Go and rustls carry the client's certificate in the ticket (Go also re-checks its expiry when resuming).
+  Matching them means ktls sealing its own tickets in place of `ssl_ticket.c`: a later phase, when someone needs
+  resumption with client certificates. Until then such a server runs a full handshake every time, as it did.
 
-**Proposed shape**
-- **Server.** `TlsConfig.sessionTickets(…)` turns tickets on.
-  - It owns an `mbedtls_ssl_ticket_context`, with random keys kept in memory only and rotated each lifetime, so a
-    restart invalidates every ticket.
-  - It sets `mbedtls_ssl_conf_session_tickets_cb`, and `mbedtls_ssl_conf_new_session_tickets` for how many a
-    handshake sends.
-  - `ssl_ticket.c` locks its own state under `MBEDTLS_THREADING_C`, so one configuration still serves sessions on
-    any isolate.
-- **Client.**
-  - An opaque `TlsSession` resource (`Sendable`, so a pool on another isolate can hold it).
-  - `TlsStream.session()` answers `Optional<TlsSession>` once a ticket has arrived, and a way to hand one to the
-    next client session before its handshake (`mbedtls_ssl_set_session`).
-  - Under TLS 1.3 the ticket arrives after the handshake. So the client enables the new-ticket signal, and
-    `ktls_read` treats `MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET` as "keep reading" after keeping the session.
-- **Both.** `TlsStream.resumed()`, so a caller (and the tests) can tell a resumed handshake from a full one.
+### TLS 1.3 (phase 9, done, 0.1.8)
 
-**Security: each item is a guard or a test**
-- **0-RTT stays off.** An `#error` fires if `MBEDTLS_SSL_EARLY_DATA` is ever on, because early data can be
-  replayed.
-- **A session is offered only to the name it was made for.** Check whether Mbed TLS 4.1.1 compares the ticket's
-  hostname (it keeps `session->hostname`). If it does not, ktls compares before `mbedtls_ssl_set_session`.
-- **A resumed session does not verify the certificate again,** so revocation is only as fresh as the ticket
-  lifetime. Say so in the API comment, and keep the default lifetime short.
-- **`TlsSession` holds the resumption secret.** Wipe it on drop (`mbedtls_ssl_session_free` zeroizes) and never log
-  it.
-- **Test the peer accessors on a resumed session:** `peerCertificate()`, `peerNames()` and `tlsServerEndPoint()`
-  rely on `MBEDTLS_SSL_KEEP_PEER_CERTIFICATE` (on). Also test that `tlsExporter()` still differs from session to
-  session.
-- **A TLS 1.3 resumption that offers pure PSK is refused,** and a TLS 1.2 session without EMS is never resumed (see
-  the decisions above). Each gets a test.
+**The API.**
+- `TlsConfig.sessionTickets(lifetime: Duration)`, on both sides.
+  - A server seals tickets under random AES-256-GCM keys held only in memory (`mbedtls_ssl_ticket_setup` with
+    `PSA_ALG_GCM`), so a restart ends every ticket. `ssl_ticket.c` replaces the key every `lifetime` and keeps the one
+    before for another period, so a ticket stays readable for its whole lifetime, and no key lives past twice it.
+    `ssl_ticket.c` locks its own state, so one configuration still serves sessions on any isolate.
+  - A client offers psk_dhe_ke, keeps the tickets a server sends, and offers none older than its own `lifetime`,
+    whatever the server allowed: the kept ticket's lifetime is cut to the configuration's, and Mbed TLS's own
+    offer-time check (`ssl_client.c`) enforces it.
+  - A second call replaces the first. Setting the ticket context up twice would leak its PSA keys, so it is freed and
+    initialised again first.
+- `TlsSession` (`src/session.kama`): an opaque, `Sendable` resource holding Mbed TLS's session (the ticket, the
+  resumption secret, the server's certificate), the configuration's id and the server name. Dropping it calls
+  `mbedtls_ssl_session_free`, which wipes the secret.
+- `TlsStream.takeSession()`: the latest ticket, handed over once, as `takeKeyLog()` hands over key-log lines. RFC 8446
+  (appendix C.4) has a client use a ticket once, so only the latest is kept. OpenSSL sends two by default; a small queue
+  waits until a pool needs several resumptions in parallel. The ROADMAP's earlier `session()` became this.
+- `TlsStream.resumeWith(session:)`: takes the session by `give`, before the handshake. It answers -5 for another
+  configuration (a process-wide id, not the pointer, which can be reused), another server name (byte for byte, as Mbed
+  TLS compares), a server stream, a handshake already begun, a session already offered, or a session that is not TLS
+  1.3.
+- `TlsStream.resumed()`, on both sides.
+
+**What the vendored Mbed TLS 4.1.1 does, and what ktls does about it.**
+1. **The client always signals a ticket.** `mbedtls_ssl_conf_tls13_enable_signal_new_session_tickets`, which this
+   section once planned to call, does not exist in 4.1.1.
+2. **A ticket is held before it is processed.** A client's `mbedtls_ssl_read` reads the NewSessionTicket record, holds
+   it, and answers WANT_READ (`ssl_msg.c`); only the next read or write processes it, answering
+   `RECEIVED_NEW_SESSION_TICKET`. `ktls_read` passed that WANT_READ on, so the stream waited on the transport for
+   bytes it may already have held, and `ktls_write` passed the ticket code up as an error.
+   - Now `ktls_read` goes round again on WANT_READ while a record is held (`mbedtls_ssl_check_pending`) or fed bytes
+     remain, bounded by progress, and keeps a ticket and goes on; `ktls_write` keeps a ticket and writes again.
+   - This was a bug in every earlier version, for a client of any server that sends TLS 1.3 tickets. It showed when
+     the last ticket and the data behind it arrived in one transport read: a 0.1.7 client that waited half a second
+     before reading from `openssl s_server -rev` hung until it was killed.
+3. **A server's ticket comes after the step Mbed TLS calls the end.** The NewSessionTicket states sort after
+   `MBEDTLS_SSL_HANDSHAKE_OVER`, so `ktls_handshake`'s step loop stopped before the ticket was written. A server now
+   finishes with `mbedtls_ssl_handshake`, which sends it.
+4. **Mbed TLS's own ticket-name check is not the binding.** It compares names with a case-sensitive `strcmp`, fails the
+   handshake on a mismatch rather than running a full one, and takes two sessions given no name (every IP literal, and
+   a `Verify::Chain` client with no name) as a match. So `resumeWith` checks the configuration and the name first.
+5. **Whether a handshake resumed is private state.** Under TLS 1.3 it is the handshake's key-exchange mode, recorded in
+   `ktls_handshake`'s step loop beside `cert_requested`. It counts any PSK mode, so a pure-PSK handshake could not pass
+   for a full one. TLS 1.2's resume flag is recorded too, for phase 10, because TLS 1.2's wrap-up frees the handshake.
+   - On a resumed session the verify result reads `MBEDTLS_X509_BADCERT_SKIP_VERIFY` (0x80) on both sides. It never
+     surfaces as a failure: `explain()` names certificate flags only for a certificate-verification error.
+   - A resumed client still has the server's certificate (the session copy keeps it), so `peerCertificate()`,
+     `peerNames()` and `tlsServerEndPoint()` answer as before. A resumed server has no client certificate.
+   - A resumed server still hears the SNI name: Mbed TLS runs the SNI callback before it chooses a PSK.
+6. **A ticket is opened only in a TLS 1.3 handshake, for a TLS 1.3 session.** Mbed TLS registers one pair of ticket
+   callbacks for both versions and hands them the ticket context, not the session. So `ktls_handshake` records the
+   session it is stepping in a thread-local (`ktls_stepping`), `ktls_accept_ticket` refuses a ticket unless that
+   handshake is TLS 1.3 and the ticket's session is too, and `ktls_issue_ticket` seals only a TLS 1.3 session. A TLS 1.2
+   server whose callback declines sends an empty ticket, as RFC 5077 allows.
+7. **Pure PSK is compiled out**: `#undef MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_ENABLED` in
+   `csrc/ktls_mbedtls_user_config.h`, so no configuration can negotiate it. A server sets EPHEMERAL | PSK_EPHEMERAL; a
+   client EPHEMERAL alone until it opts in. `ktls.c` has an `#error` if psk_ke or `MBEDTLS_SSL_EARLY_DATA` is ever on,
+   and if tickets, `MBEDTLS_HAVE_TIME` or psk_dhe_ke is off.
+8. **A ticket that cannot be written fails a TLS 1.3 handshake**, and Mbed TLS refuses to send a lifetime over 7 days.
+   So the setter refuses one.
+9. **A resuming ClientHello offers only the session's version** (`ssl_client.c`), so a server that has dropped TLS 1.3
+   since fails the handshake rather than falling back to 1.2. See Known differences.
+10. **Ticket ages use `mbedtls_ms_time`**, which is the wall clock on Windows (`GetSystemTimeAsFileTime`) and a monotonic
+    clock elsewhere. A clock that moves backwards makes an age negative, and the ticket is simply not offered.
+
+**Tests.** `tests/src/resumption_test.kama`, over the in-memory pipe:
+- resuming: a full handshake, then a resumed one on both sides, with data both ways; the peer accessors and SNI on a
+  resumed session, and a tls-exporter of its own; a resumed connection's ticket resumes the next; a session is handed
+  over once;
+- on the wire, read off the pipe with a small ClientHello parser: a client without tickets sends neither
+  psk_key_exchange_modes (45) nor pre_shared_key (41); one with them sends psk_key_exchange_modes as exactly
+  `[psk_dhe_ke]`; a resuming ClientHello ends with pre_shared_key; neither a server nor a client without tickets ends
+  up with a session;
+- refusals: another name (`127.0.0.1`, `LOCALHOST`), another configuration alike in every setting, a server stream, a
+  handshake begun; a `share()` of the same configuration resumes;
+- fallbacks: a server with other ticket keys, a ticket past the server's 1-second lifetime, one past the client's
+  1-second lifetime against a server allowing an hour (one 2.1-second sleep covers both), and TLS 1.2 pinned on both
+  sides;
+- the read fixes: a ticket and data in one flight read as the data; the ticket leaves with the server's handshake; a
+  write after a read that took only the ticket;
+- the setter: 0 s, 999 ms and 604801 s refused, 604800 s allowed, -4 once frozen; client certificates and tickets
+  refused in either order; `TlsSession` is `Sendable`.
+
+`tests/csrc/raw_client.c` drives a raw Mbed TLS client against a ktls server session through `ktls.h`'s buffer API, for
+ClientHellos the package's own client never sends: a control that resumes, a TLS 1.3 ticket offered in a TLS 1.2
+ClientHello (not resumed), and a TLS 1.2 client asking for a ticket (it gets an empty one). `tests/src/shared_test.kama`
+calls `sessionTickets` in its loading rounds.
+
+**Mutation checks**, each a temporary edit, reverted:
+- no server tail call: the server's ticket test fails, and the raw client gets no ticket;
+- no held-record retry in `ktls_read`: the first data after a handshake does not arrive, and no session is kept;
+- no thread-local check in `ktls_accept_ticket`: the TLS 1.2 ClientHello case fails;
+- no configuration-id check: a configuration alike in every setting resumes;
+- no lifetime clamp: a ticket past the client's lifetime resumes;
+- no name check: both name cases fail the handshake inside Mbed TLS ("invalid input data").
+
+**Interop, once**, with Git Bash's OpenSSL 3.5.7 on Windows x86-64 and throwaway programs, as phases 4 and 5 were
+checked:
+- a 0.1.7 client reading from `openssl s_server -rev` (two tickets by default) after a half-second wait hung until it
+  was killed after 10 s; the new build read the reply;
+- the new client kept a ticket from `s_server` and resumed twice, each time with a fresh X25519 key; with
+  `-groups secp384r1`, which forces a HelloRetryRequest, it resumed the same way, each connection with a fresh
+  secp384r1 key;
+- `s_client -sess_out` then `-sess_in` against a kama server: "New, TLSv1.3", then "Reused, TLSv1.3", and the server's
+  `resumed()` agreed;
+- `s_client -tls1_2`: the session has no session ID and an empty ticket, so OpenSSL keeps nothing to resume.
+
+**The gate.** Green on Windows x86-64, debug and release, with kama 0.9.719 (dev, msys2 UCRT64 clang) and with
+0.9.690's release with zig bundled, CI's toolchain. CI covers Linux x86-64, macOS arm64 and Windows x86-64 once
+pushed. The Mac session runs `tools/tsan.sh` (the ticket context is shared by isolates) and the dev-compiler gate on
+macOS arm64 and Linux aarch64.
+
+### TLS 1.2 (phase 10, planned)
+
+- The hooks are in place: `ktls_issue_ticket` and `ktls_accept_ticket` refuse TLS 1.2 today. Phase 10 lets a TLS 1.2
+  session through when it was made with extended master secret, and keeps refusing a ticket whose session's version
+  differs from the handshake's.
+- A server-side session-ID cache (`ssl_cache.c`, `mbedtls_ssl_conf_session_cache`) for clients that send no ticket,
+  under the same EMS rule.
+- A client asks for TLS 1.2 tickets again (`mbedtls_ssl_conf_session_tickets`, off since 0.1.8), and `takeSession()`
+  answers after a TLS 1.2 handshake, which has no post-handshake ticket.
+- RFC 6066 §3: a server must not resume a TLS 1.2 session for a client asking for another SNI name. Mbed TLS's tickets
+  do not record one, so ktls does.
+- `resumed()` already records TLS 1.2's resume flag.
 
 **Payoff.** A TLS 1.3 resumption skips the certificate and its signature, not a round trip; only 0-RTT saves a
 round trip, and it stays off. So the gain is CPU on both sides, and the size of the server's certificate on the
@@ -440,3 +542,9 @@ verifier knows more:
   that is `/etc/ssl/cert.pem`, which Apple maintains, not the keychain. On Windows it imports the ROOT store, which
   lacks any root Windows has not yet downloaded. `SSL_CERT_FILE` overrides it everywhere, as with OpenSSL. Phase 12
   is the system's verifier.
+- **A resuming client offers only TLS 1.3.** Mbed TLS limits a ClientHello that offers a session to that session's
+  version, so a server that has dropped TLS 1.3 since the ticket was issued fails the handshake rather than
+  negotiating TLS 1.2. Another stack would offer both and run a full TLS 1.2 handshake. The caller can drop the
+  session and connect again.
+- **A server that asks for client certificates issues no session tickets.** OpenSSL keeps the client's certificate in
+  its tickets; Mbed TLS's TLS 1.3 ticket has no room for it (see [Session resumption](#session-resumption)).

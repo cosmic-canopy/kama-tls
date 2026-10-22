@@ -1,0 +1,404 @@
+// Session resumption, TLS 1.3 (`TlsConfig.sessionTickets`): a client keeps the ticket a server sends and resumes a
+// later connection with it, skipping the certificate. Only a TLS 1.3 session resumes, always with a fresh (EC)DHE
+// (psk_dhe_ke; pure PSK is compiled out), and no ticket is accepted in a TLS 1.2 handshake. A session resumes only
+// through the configuration it was made with, for the same server name, within both sides' lifetimes. And a read
+// that meets the server's NewSessionTicket goes on to the data behind it, rather than waiting on the transport for
+// bytes it already holds.
+import { std::io::IoError, std::io::writeAll, std::collections::DynamicArray, std::collections::FixedArray,
+         std::time::Duration, std::time::sleep,
+         tls::TlsConfig, tls::TlsStream, tls::TlsSession, tls::TlsError, tls::Verify, tls::TlsVersion, tls::Progress,
+         tls_tests::check, tls_tests::fail, tls_tests::PipeEnd, tls_tests::pipePair, tls_tests::certPath, tls_tests::serverConfig,
+         tls_tests::clientConfig, tls_tests::connect, tls_tests::drive, tls_tests::completed, tls_tests::describe,
+         tls_tests::carries, tls_tests::Session, tls_tests::Outcome, tls_tests::sameBytes, tls_tests::codeOf };
+export { resumptionTests };
+
+extern "raw_client.h";
+extern fn int32 ktls_test_raw_resume(UnsafeConstPtr<cchar> cert, UnsafeConstPtr<cchar> key, int32 which);
+extern fn int32 ktls_test_raw_tls12_ticket(UnsafeConstPtr<cchar> cert, UnsafeConstPtr<cchar> key);
+
+comptime int64 HOUR = 3600i64;
+// ClientHello extensions (RFC 8446 section 4.2): psk_key_exchange_modes, and pre_shared_key, which must come last.
+comptime isize PSK_MODES = 45;
+comptime isize PRE_SHARED_KEY = 41;
+
+// A client verifying the test CA by name, or a server presenting server.crt; with tickets for `secs`, or none at 0.
+fn TlsConfig withTickets(bool server, int64 secs) {
+    string ca = "ca.crt";
+    string crt = "server.crt"; string key = "server.key";
+    Result<TlsConfig, TlsError> made = Result::Err(error: TlsError::Closed);
+    if (server) { made = serverConfig(certName: crt, keyName: key); }
+    else { made = clientConfig(mode: Verify::Full, caName: ca); }
+    TlsConfig c = match (give made) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<TlsConfig>(msg: "config: ${m}"); } };
+    if (secs > 0i64) {
+        int32 on = codeOf(r: c.sessionTickets(lifetime: Duration.fromSecs(s: secs)));
+        if (on != 0) { return fail::<TlsConfig>(msg: "sessionTickets: ${on}"); }
+    }
+    return c;
+}
+
+// A full handshake for `name`, data both ways (the client's read takes the server's ticket), then whatever session
+// the client kept.
+fn Optional<TlsSession> sessionFrom(const ref TlsConfig client, const ref TlsConfig server, const ref string name) {
+    Result<Session, TlsError> made = connect(client: client, server: server, name: name);
+    Session p = match (give made) { case Ok(value: x): give x; case Err(error: e): { return Optional::None; } };
+    Outcome o = drive(c: p.c(), s: p.s());
+    if (!completed(o: o)) { return Optional::None; }
+    string ping = "ping"; string pong = "pong";
+    if (!carries(from: p.c(), to: p.s(), msg: ping) || !carries(from: p.s(), to: p.c(), msg: pong)) { return Optional::None; }
+    return p.c().takeSession();
+}
+
+fn TlsSession mustSession(const ref TlsConfig client, const ref TlsConfig server, const ref string name) {
+    Optional<TlsSession> kept = sessionFrom(client: client, server: server, name: name);
+    return match (give kept) { case Some(value: t): give t; case None: fail::<TlsSession>(msg: "no session to resume"); };
+}
+
+// What a connection offering `session` made of it.
+type enum Resume { Resumed, Full, Refused(int32 code), Failed(string why), Mixed }
+
+fn string told(const ref Resume r) {
+    return match (r) {
+        case Resumed: "resumed";
+        case Full: "a full handshake";
+        case Refused(code: c): "refused with ${c}";
+        case Failed(why: w): copy w;
+        case Mixed: "only one side resumed";
+    };
+}
+
+fn bool isResumed(const ref Resume r) { return match (r) { case Resumed: true; case _: false; }; }
+fn bool isFull(const ref Resume r) { return match (r) { case Full: true; case _: false; }; }
+fn bool isRefused(const ref Resume r) { return match (r) { case Refused(code: c): c == -5; case _: false; }; }
+
+fn Resume resume(const ref TlsConfig client, const ref TlsConfig server, const ref string name, TlsSession session) {
+    Result<Session, TlsError> made = connect(client: client, server: server, name: name);
+    Session p = match (give made) { case Ok(value: x): give x; case Err(error: e): { return Resume::Failed(why: e.message()); } };
+    int32 offered = codeOf(r: p.c().resumeWith(session: give session));
+    if (offered != 0) { return Resume::Refused(code: offered); }
+    Outcome o = drive(c: p.c(), s: p.s());
+    if (!completed(o: o)) { return Resume::Failed(why: describe(o: o)); }
+    bool cr = p.c().resumed();
+    bool sr = p.s().resumed();
+    if (cr && sr) { return Resume::Resumed; }
+    if (!cr && !sr) { return Resume::Full; }
+    return Resume::Mixed;
+}
+
+// A full handshake, a resumed one, and a third resumed with the second's own ticket.
+fn int32 resumeTests() {
+    int32 f = 0;
+    string localhost = "localhost";
+    TlsConfig client = withTickets(server: false, secs: HOUR);
+    TlsConfig server = withTickets(server: true, secs: HOUR);
+
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session first = match (give made) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<Session>(msg: "session: ${m}"); } };
+    Outcome o1 = drive(c: first.c(), s: first.s());
+    f = f + check(ok: completed(o: o1) && !first.c().resumed() && !first.s().resumed(), what: "resume: a first handshake is a full one (".concat(other: describe(o: o1)).concat(other: ")"));
+    string ping = "ping"; string pong = "pong";
+    f = f + check(ok: carries(from: first.c(), to: first.s(), msg: ping) && carries(from: first.s(), to: first.c(), msg: pong), what: "resume: data on the first connection");
+    DynamicArray<uint8> cert1 = first.c().peerCertificate();
+    DynamicArray<uint8> end1 = first.c().tlsServerEndPoint();
+    DynamicArray<uint8> exp1 = first.c().tlsExporter();
+    Optional<TlsSession> kept = first.c().takeSession();
+    Optional<TlsSession> again = first.c().takeSession();
+    bool once = match (again) { case Some(value: t): false; case None: true; };
+    f = f + check(ok: once, what: "resume: a session is handed over once");
+    TlsSession t1 = match (give kept) { case Some(value: t): give t; case None: { return f + check(ok: false, what: "resume: the client keeps the server's ticket"); } };
+
+    Result<Session, TlsError> made2 = connect(client: client, server: server, name: localhost);
+    Session second = match (give made2) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<Session>(msg: "session: ${m}"); } };
+    f = f + check(ok: codeOf(r: second.c().resumeWith(session: give t1)) == 0, what: "resume: a session from this configuration, for this name, is offered");
+    Outcome o2 = drive(c: second.c(), s: second.s());
+    f = f + check(ok: completed(o: o2) && second.c().resumed() && second.s().resumed(), what: "resume: the second handshake resumes, on both sides (".concat(other: describe(o: o2)).concat(other: ")"));
+    f = f + check(ok: carries(from: second.c(), to: second.s(), msg: ping) && carries(from: second.s(), to: second.c(), msg: pong), what: "resume: data over a resumed session");
+    DynamicArray<uint8> cert2 = second.c().peerCertificate();
+    DynamicArray<uint8> end2 = second.c().tlsServerEndPoint();
+    f = f + check(ok: cert2.length() > 0 && sameBytes(a: cert1.view(), b: cert2.view()), what: "resume: a resumed client still has the server's certificate");
+    f = f + check(ok: end2.length() == 32 && sameBytes(a: end1.view(), b: end2.view()), what: "resume: and its tls-server-end-point");
+    f = f + check(ok: second.c().peerNames().count() > 0, what: "resume: and its names");
+    DynamicArray<uint8> exp2 = second.c().tlsExporter();
+    DynamicArray<uint8> theirs = second.s().tlsExporter();
+    f = f + check(ok: exp2.length() == 32 && sameBytes(a: exp2.view(), b: theirs.view()) && !sameBytes(a: exp1.view(), b: exp2.view()),
+                  what: "resume: tls-exporter is the same at both ends of a resumed session, and differs from the first's");
+    Optional<string> sni = second.s().requestedServerName();
+    bool named = match (sni) { case Some(value: n): n.equals(other: localhost); case None: false; };
+    f = f + check(ok: named, what: "resume: a resumed server still hears the SNI name");
+
+    Optional<TlsSession> kept2 = second.c().takeSession();
+    TlsSession t2 = match (give kept2) { case Some(value: t): give t; case None: { return f + check(ok: false, what: "resume: a resumed connection brings a fresh ticket"); } };
+    Resume r3 = resume(client: client, server: server, name: localhost, session: give t2);
+    f = f + check(ok: isResumed(r: r3), what: "resume: a resumed connection's own ticket resumes the next (".concat(other: told(r: r3)).concat(other: ")"));
+    return f;
+}
+
+// The first record a client sends: its ClientHello, read off the pipe before any server sees it.
+fn DynamicArray<uint8> clientHello(const ref TlsConfig client, const ref string name, Optional<TlsSession> offer) {
+    DynamicArray<PipeEnd> ends = pipePair();
+    Optional<PipeEnd> sb = ends.pop();
+    Optional<PipeEnd> ca = ends.pop();
+    PipeEnd b = match (give sb) { case Some(value: x): give x; case None: fail::<PipeEnd>(msg: "pipe"); };
+    PipeEnd a = match (give ca) { case Some(value: x): give x; case None: fail::<PipeEnd>(msg: "pipe"); };
+    Result<TlsStream<PipeEnd>, TlsError> cs = TlsStream::<PipeEnd>.client(inner: give a, config: client, serverName: name);
+    TlsStream<PipeEnd> c = match (give cs) { case Ok(value: x): give x; case Err(error: e): fail::<TlsStream<PipeEnd>>(msg: "client stream"); };
+    match (give offer) {
+        case Some(value: t): { int32 rc = codeOf(r: c.resumeWith(session: give t)); if (rc != 0) { return fail::<DynamicArray<uint8>>(msg: "offer"); } }
+        case None: { }
+    };
+    Result<Progress, TlsError> sent = c.handshake();   // writes the ClientHello, then waits for an answer
+    FixedArray<uint8> buf = FixedArray.make(size: 17408);
+    Result<isize, IoError> r = b.read(into: buf.viewMut());
+    isize n = match (r) { case Ok(value: k): k; case Err(error: e): 0; };
+    DynamicArray<uint8> hello = DynamicArray.withCapacity(capacity: n);
+    isize i = 0;
+    while (i < n) { hello.add(item: buf[i]); i = i + 1; }
+    return hello;
+}
+
+fn isize be16(const ref DynamicArray<uint8> b, isize at) { return cast<isize>(b[at]) * 256 + cast<isize>(b[at + 1]); }
+
+// Where a ClientHello record's extensions start, and where they end: past the record header (5), the handshake header
+// (4), the version (2) and the random (32), then the session id, the cipher suites and the compression methods, each
+// behind its length. -1 when the record is too short to say.
+fn isize extensionsAt(const ref DynamicArray<uint8> hello) {
+    isize at = 43;
+    if (hello.length() < at + 1) { return -1; }
+    at = at + 1 + cast<isize>(hello[at]);
+    if (hello.length() < at + 2) { return -1; }
+    at = at + 2 + be16(b: hello, at: at);
+    if (hello.length() < at + 1) { return -1; }
+    at = at + 1 + cast<isize>(hello[at]);
+    if (hello.length() < at + 2) { return -1; }
+    return at;
+}
+
+// The ClientHello's extension types, in order.
+fn DynamicArray<isize> extensionKinds(const ref DynamicArray<uint8> hello) {
+    DynamicArray<isize> kinds = DynamicArray.empty();
+    isize at = extensionsAt(hello: hello);
+    if (at < 0) { return kinds; }
+    isize end = at + 2 + be16(b: hello, at: at);
+    at = at + 2;
+    while (at + 4 <= end && end <= hello.length()) {
+        kinds.add(item: be16(b: hello, at: at));
+        at = at + 4 + be16(b: hello, at: at + 2);
+    }
+    return kinds;
+}
+
+// The body of extension `kind`, or None.
+fn Optional<DynamicArray<uint8>> extensionBody(const ref DynamicArray<uint8> hello, isize kind) {
+    isize at = extensionsAt(hello: hello);
+    if (at < 0) { return Optional::None; }
+    isize end = at + 2 + be16(b: hello, at: at);
+    at = at + 2;
+    while (at + 4 <= end && end <= hello.length()) {
+        isize len = be16(b: hello, at: at + 2);
+        if (be16(b: hello, at: at) == kind && at + 4 + len <= end) {
+            DynamicArray<uint8> body = DynamicArray.withCapacity(capacity: len);
+            isize i = 0;
+            while (i < len) { body.add(item: hello[at + 4 + i]); i = i + 1; }
+            return Optional::Some(value: give body);
+        }
+        at = at + 4 + len;
+    }
+    return Optional::None;
+}
+
+fn bool has(const ref DynamicArray<isize> kinds, isize kind) {
+    foreach (isize k in kinds) { if (k == kind) { return true; } }
+    return false;
+}
+
+// What a client puts on the wire, and who gets a ticket.
+fn int32 wireTests() {
+    int32 f = 0;
+    string localhost = "localhost";
+    TlsConfig plain = withTickets(server: false, secs: 0i64);
+    TlsConfig keeper = withTickets(server: false, secs: HOUR);
+    TlsConfig server = withTickets(server: true, secs: HOUR);
+    TlsConfig plainServer = withTickets(server: true, secs: 0i64);
+
+    DynamicArray<uint8> h1 = clientHello(client: plain, name: localhost, offer: Optional::None);
+    DynamicArray<isize> k1 = extensionKinds(hello: h1);
+    f = f + check(ok: k1.length() > 0 && !has(kinds: k1, kind: PSK_MODES) && !has(kinds: k1, kind: PRE_SHARED_KEY),
+                  what: "wire: a client without tickets offers no PSK mode, so a server sends it no ticket");
+    DynamicArray<uint8> h2 = clientHello(client: keeper, name: localhost, offer: Optional::None);
+    Optional<DynamicArray<uint8>> modes = extensionBody(hello: h2, kind: PSK_MODES);
+    bool dheOnly = match (modes) { case Some(value: m): m.length() == 2 && m[0] == 1ui8 && m[1] == 1ui8; case None: false; };
+    f = f + check(ok: dheOnly, what: "wire: a client with tickets offers psk_dhe_ke alone, never psk_ke");
+
+    TlsSession t = mustSession(client: keeper, server: server, name: localhost);
+    DynamicArray<uint8> h3 = clientHello(client: keeper, name: localhost, offer: Optional::Some(value: give t));
+    DynamicArray<isize> k3 = extensionKinds(hello: h3);
+    bool lastIsPsk = k3.length() > 0 && k3[k3.length() - 1] == PRE_SHARED_KEY;
+    f = f + check(ok: lastIsPsk && has(kinds: k3, kind: PSK_MODES), what: "wire: a resuming ClientHello carries pre_shared_key, last");
+
+    Optional<TlsSession> none1 = sessionFrom(client: keeper, server: plainServer, name: localhost);
+    f = f + check(ok: isNone(o: none1), what: "wire: a server without tickets issues none");
+    Optional<TlsSession> none2 = sessionFrom(client: plain, server: server, name: localhost);
+    f = f + check(ok: isNone(o: none2), what: "wire: a client without tickets keeps none");
+    return f;
+}
+
+fn bool isNone(const ref Optional<TlsSession> o) { return match (o) { case Some(value: x): false; case None: true; }; }
+
+// A session is offered only through the configuration it was made with, for the name it was made for.
+fn int32 bindingTests() {
+    int32 f = 0;
+    string localhost = "localhost";
+    string loopback = "127.0.0.1";
+    string upper = "LOCALHOST";
+    TlsConfig client = withTickets(server: false, secs: HOUR);
+    TlsConfig server = withTickets(server: true, secs: HOUR);
+
+    Resume byIp = resume(client: client, server: server, name: loopback, session: mustSession(client: client, server: server, name: localhost));
+    f = f + check(ok: isRefused(r: byIp), what: "binding: a session for localhost is refused for 127.0.0.1 (".concat(other: told(r: byIp)).concat(other: ")"));
+    Resume byCase = resume(client: client, server: server, name: upper, session: mustSession(client: client, server: server, name: localhost));
+    f = f + check(ok: isRefused(r: byCase), what: "binding: names compare byte for byte (".concat(other: told(r: byCase)).concat(other: ")"));
+
+    TlsConfig twin = withTickets(server: false, secs: HOUR);
+    Resume other = resume(client: twin, server: server, name: localhost, session: mustSession(client: client, server: server, name: localhost));
+    f = f + check(ok: isRefused(r: other), what: "binding: another configuration, however alike, is refused (".concat(other: told(r: other)).concat(other: ")"));
+    TlsConfig shared = client.share();
+    Resume same = resume(client: shared, server: server, name: localhost, session: mustSession(client: client, server: server, name: localhost));
+    f = f + check(ok: isResumed(r: same), what: "binding: a share() of the same configuration resumes (".concat(other: told(r: same)).concat(other: ")"));
+
+    // On a server stream, and once the handshake has begun.
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session p = match (give made) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<Session>(msg: "session: ${m}"); } };
+    f = f + check(ok: codeOf(r: p.s().resumeWith(session: mustSession(client: client, server: server, name: localhost))) == -5,
+                  what: "binding: a server stream refuses a session");
+    Result<Progress, TlsError> begun = p.c().handshake();
+    f = f + check(ok: codeOf(r: p.c().resumeWith(session: mustSession(client: client, server: server, name: localhost))) == -5,
+                  what: "binding: a session is refused once the handshake has begun");
+    return f;
+}
+
+// When a session cannot resume, the handshake is a full one.
+fn int32 fallbackTests() {
+    int32 f = 0;
+    string localhost = "localhost";
+    TlsConfig client = withTickets(server: false, secs: HOUR);
+    TlsConfig server = withTickets(server: true, secs: HOUR);
+
+    TlsConfig otherServer = withTickets(server: true, secs: HOUR);
+    Resume elsewhere = resume(client: client, server: otherServer, name: localhost, session: mustSession(client: client, server: server, name: localhost));
+    f = f + check(ok: isFull(r: elsewhere), what: "fallback: a server with other ticket keys runs a full handshake (".concat(other: told(r: elsewhere)).concat(other: ")"));
+
+    // Expiry: a ticket the server issued for one second, and a client that keeps one for one second, are both past
+    // their lifetime after two.
+    TlsConfig briefServer = withTickets(server: true, secs: 1i64);
+    TlsConfig briefClient = withTickets(server: false, secs: 1i64);
+    TlsSession byServer = mustSession(client: client, server: briefServer, name: localhost);
+    TlsSession byClient = mustSession(client: briefClient, server: server, name: localhost);
+    sleep(d: Duration.fromMillis(ms: 2100i64));
+    Resume late1 = resume(client: client, server: briefServer, name: localhost, session: give byServer);
+    f = f + check(ok: isFull(r: late1), what: "fallback: a ticket past the server's lifetime is not resumed (".concat(other: told(r: late1)).concat(other: ")"));
+    Resume late2 = resume(client: briefClient, server: server, name: localhost, session: give byClient);
+    f = f + check(ok: isFull(r: late2), what: "fallback: nor one past the client's, though the server allows an hour (".concat(other: told(r: late2)).concat(other: ")"));
+
+    // TLS 1.2 neither issues nor keeps one.
+    TlsConfig client12 = withTickets(server: false, secs: HOUR);
+    TlsConfig server12 = withTickets(server: true, secs: HOUR);
+    int32 pinC = codeOf(r: client12.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12));
+    int32 pinS = codeOf(r: server12.versions(min: TlsVersion::Tls12, max: TlsVersion::Tls12));
+    Optional<TlsSession> none = sessionFrom(client: client12, server: server12, name: localhost);
+    f = f + check(ok: pinC == 0 && pinS == 0 && isNone(o: none), what: "fallback: a TLS 1.2 session gives nothing to resume");
+    return f;
+}
+
+// A read that meets the server's ticket goes on to what follows it, and the ticket leaves with the server's handshake.
+fn int32 heldTicketTests() {
+    int32 f = 0;
+    string localhost = "localhost";
+    TlsConfig client = withTickets(server: false, secs: HOUR);
+    TlsConfig server = withTickets(server: true, secs: HOUR);
+    FixedArray<uint8> buf = FixedArray.make(size: 256);
+
+    // The ticket and the server's first data arrive together: the client's first read answers the data.
+    Result<Session, TlsError> made = connect(client: client, server: server, name: localhost);
+    Session p = match (give made) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<Session>(msg: "session: ${m}"); } };
+    Outcome o = drive(c: p.c(), s: p.s());
+    string hello = "hello";
+    Result<Unit, IoError> w = writeAll(w: p.s(), bytes: hello.bytes());
+    Result<isize, IoError> r = p.c().read(into: buf.viewMut());
+    isize n = match (r) { case Ok(value: k): k; case Err(error: e): -1; };
+    f = f + check(ok: completed(o: o) && n == 5 && buf[0] == 104ui8, what: "held ticket: a read that meets the ticket goes on to the data behind it");
+    Optional<TlsSession> kept = p.c().takeSession();
+    f = f + check(ok: !isNone(o: kept), what: "held ticket: and keeps the ticket");
+
+    // The server's handshake alone sends the ticket: a client read finds no data, but takes the ticket.
+    Result<Session, TlsError> made2 = connect(client: client, server: server, name: localhost);
+    Session q = match (give made2) { case Ok(value: x): give x; case Err(error: e): { string m = e.message(); := fail::<Session>(msg: "session: ${m}"); } };
+    Outcome o2 = drive(c: q.c(), s: q.s());
+    Result<isize, IoError> r2 = q.c().read(into: buf.viewMut());
+    bool nothing = match (r2) { case Ok(value: k): false; case Err(error: e): true; };
+    Optional<TlsSession> kept2 = q.c().takeSession();
+    bool ticket = !isNone(o: kept2);
+    f = f + check(ok: completed(o: o2) && nothing && ticket, what: "held ticket: the server's handshake sends its ticket");
+    // And the client writes on after a read that took only the ticket.
+    string after = "after";
+    f = f + check(ok: carries(from: q.c(), to: q.s(), msg: after), what: "held ticket: a write after a read that took only the ticket");
+    return f;
+}
+
+// The setter's rules.
+fn int32 setterTests() {
+    int32 f = 0;
+    TlsConfig client = withTickets(server: false, secs: 0i64);
+    f = f + check(ok: codeOf(r: client.sessionTickets(lifetime: Duration.fromSecs(s: 0i64))) == -5, what: "setter: a lifetime of 0 is refused");
+    f = f + check(ok: codeOf(r: client.sessionTickets(lifetime: Duration.fromMillis(ms: 999i64))) == -5, what: "setter: so is less than a second");
+    f = f + check(ok: codeOf(r: client.sessionTickets(lifetime: Duration.fromSecs(s: 604801i64))) == -5, what: "setter: so is more than seven days");
+    f = f + check(ok: codeOf(r: client.sessionTickets(lifetime: Duration.fromSecs(s: 604800i64))) == 0, what: "setter: seven days is allowed");
+
+    TlsConfig verifying = withTickets(server: true, secs: 0i64);
+    int32 v = codeOf(r: verifying.verify(mode: Verify::Chain));
+    f = f + check(ok: v == 0 && codeOf(r: verifying.sessionTickets(lifetime: Duration.fromSecs(s: HOUR))) == -5, what: "setter: a server verifying clients issues no tickets");
+    TlsConfig issuing = withTickets(server: true, secs: HOUR);
+    f = f + check(ok: codeOf(r: issuing.verify(mode: Verify::Chain)) == -5, what: "setter: a server issuing tickets verifies no clients");
+    f = f + check(ok: codeOf(r: issuing.requestClientCertificate()) == -5, what: "setter: nor asks for a client certificate");
+    f = f + check(ok: codeOf(r: issuing.verify(mode: Verify::None)) == 0, what: "setter: verifying none stays allowed");
+    f = f + check(ok: codeOf(r: issuing.sessionTickets(lifetime: Duration.fromSecs(s: 60i64))) == 0, what: "setter: a second call replaces the first");
+
+    string localhost = "localhost";
+    Optional<TlsSession> used = sessionFrom(client: client, server: issuing, name: localhost);
+    f = f + check(ok: codeOf(r: client.sessionTickets(lifetime: Duration.fromSecs(s: HOUR))) == -4, what: "setter: frozen once a session is made");
+    return f;
+}
+
+// A TlsSession is Sendable, so a pool on another isolate may hold one: this compiles only if it is.
+type enum Pooled implements Sendable { Held(TlsSession session), Empty }
+
+fn int32 sendableTest() {
+    Pooled p = Pooled::Empty;
+    bool empty = match (give p) { case Held(session: s): false; case Empty: true; };
+    return check(ok: empty, what: "session: TlsSession is Sendable");
+}
+
+// A raw Mbed TLS client (tests/csrc/raw_client.c), for ClientHellos the package's own client never sends.
+unsafe fn int32 rawClientTests() {
+    int32 f = 0;
+    string crt = certPath(name: "server.crt");
+    string key = certPath(name: "server.key");
+    int32 control = ktls_test_raw_resume(cert: crt.cstr(), key: key.cstr(), which: 0);
+    f = f + check(ok: control == 1, what: "raw client: Mbed TLS's own client resumes against this server (${control})");
+    int32 as12 = ktls_test_raw_resume(cert: crt.cstr(), key: key.cstr(), which: 1);
+    f = f + check(ok: as12 == 0, what: "raw client: a TLS 1.3 ticket in a TLS 1.2 handshake is not resumed (${as12})");
+    int32 len12 = ktls_test_raw_tls12_ticket(cert: crt.cstr(), key: key.cstr());
+    f = f + check(ok: len12 == 0, what: "raw client: a TLS 1.2 client asking for a ticket gets an empty one (${len12})");
+    return f;
+}
+
+unsafe fn int32 resumptionTests() {
+    int32 f = 0;
+    f = f + resumeTests();
+    f = f + wireTests();
+    f = f + bindingTests();
+    f = f + fallbackTests();
+    f = f + heldTicketTests();
+    f = f + setterTests();
+    f = f + sendableTest();
+    f = f + rawClientTests();
+    return f;
+}

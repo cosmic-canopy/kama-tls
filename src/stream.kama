@@ -1,6 +1,6 @@
 import { std::io::IoError, std::io::IoErrorKind, std::io::Reader, std::io::Writer, std::net::ReliableStream, std::collections::View, std::collections::ConstView,
          std::collections::FixedArray, std::collections::DynamicArray,
-         tls::TlsError, tls::TlsConfig, tls::TlsVersion, tls::Progress, tls::errorText, tls::CertificateNames };
+         tls::TlsError, tls::TlsConfig, tls::TlsVersion, tls::Progress, tls::errorText, tls::CertificateNames, tls::TlsSession };
 export { TlsStream };
 
 // A TLS session over a stream: `TlsStream<TcpStream>`, `TlsStream<UnixStream>`, or anything else that is a
@@ -47,6 +47,9 @@ extern fn int32 ktls_session_keylog(UnsafePtr s);
 extern fn usize ktls_keylog_pending(UnsafePtr s);
 extern fn usize ktls_keylog_take(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
 extern fn usize ktls_sni(UnsafePtr s, UnsafePtr<uint8> buf, usize cap);
+extern fn UnsafePtr ktls_ticket_take(UnsafePtr s);
+extern fn int32 ktls_session_resume_with(UnsafePtr s, UnsafePtr t);
+extern fn int32 ktls_resumed(UnsafePtr s);
 extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
 
 // The engine's own answers (csrc/ktls.h) and the one Mbed TLS code this file tells apart, each pinned by a
@@ -279,6 +282,35 @@ type resource TlsStream<S: ReliableStream> implements ReliableStream, Reader, Wr
         while (i < got) { buf[i] = 0ui8; i = i + 1; }   // the copy in kama's memory is a secret too
         return lines;
     }
+
+    // A client whose configuration has `sessionTickets`: the latest session the server offered to resume, handed over
+    // once. None when no new one has arrived since the last call. A server sends its ticket after the handshake, so it
+    // arrives with a read, not with `handshake()`.
+    public unsafe fn Optional<TlsSession> takeSession() {
+        UnsafePtr t = ktls_ticket_take(s: this.session);
+        if (t == null) { return Optional::None; }
+        return Optional::Some(value: TlsSession.adopt(handle: t));
+    }
+
+    // A client: offer `session` for resumption in this stream's handshake, before the handshake begins. The session
+    // must come from a stream made through this same configuration (or a `share()` of it), for exactly this server
+    // name, byte for byte. Otherwise, or on a server stream, or once the handshake has begun, this answers a `Config`
+    // error with code -5, and the session is dropped. A session past its lifetime, or one the server declines, gives a
+    // full handshake instead; `resumed()` tells which happened. A resuming client offers only TLS 1.3.
+    public unsafe fn Result<Unit, TlsError> resumeWith(TlsSession session) {
+        int32 rc = ktls_session_resume_with(s: this.session, t: session.raw());
+        if (rc == 0) { return Result::Ok(value: Unit::Unit); }
+        if (rc == -5) {
+            return Result::Err(error: TlsError::Config(code: rc,
+                detail: "this stream cannot resume that session: it was made through another configuration or for another server name, or this stream is a server or has begun its handshake"));
+        }
+        return Result::Err(error: TlsError::Config(code: rc, detail: errorText(code: rc)));
+    }
+
+    // Whether the handshake resumed an earlier session, on either side. False before the handshake completes. A
+    // resumed session did not verify the certificate again. A resumed client still has the server's certificate from
+    // the original handshake (`peerCertificate()`, `peerNames()`, `tlsServerEndPoint()`).
+    public unsafe const fn bool resumed() { return ktls_resumed(s: this.session) != 0; }
 
     // The negotiated cipher's key size in bits (128 for AES-128-GCM, 256 for AES-256-GCM and ChaCha20); 0 before
     // the handshake completes.

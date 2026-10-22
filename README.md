@@ -12,7 +12,7 @@ kama pkg add kama.json @kama/tls --version ^0.1.0     # from the official regist
 Needs **kama ≥ 0.9.690** — declared as `"kama": ">=0.9.690"` in the manifest, so an older compiler is refused by
 name. (0.1.0 needed 0.9.519; 0.1.1 raised the floor to 0.9.523 for the registry's metadata keys, and 0.1.7 to 0.9.690
 for a library linked on Windows alone.) Tested, debug and release, on macOS arm64, Linux aarch64 and x86-64, and
-Windows x86-64. WebAssembly and bare metal are next ([docs/ROADMAP.md](docs/ROADMAP.md)).
+Windows x86-64. WebAssembly, TLS 1.2 resumption and bare metal are next ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 ## Using it
 
@@ -45,6 +45,23 @@ and each handshake serves the one whose certificate names the host the client as
 another handle). After the handshake: `protocolVersion()`, `cipherSuite()`, `alpnProtocol()`,
 `peerCertificate()` (DER), and the channel bindings a SCRAM-…-PLUS login folds in: `tlsServerEndPoint()` (RFC 5929,
 TLS 1.2 and 1.3, the one PostgreSQL uses) and `tlsExporter()` (RFC 9266 tls-exporter, TLS 1.3 only).
+
+A TLS 1.3 session can be resumed, which skips the certificate and its signature on the next connection. Both sides opt
+in with `sessionTickets(lifetime:)`, from 1 second to 7 days. A resumed session does not check the certificate again,
+so keep the lifetime short; two hours, OpenSSL's default, is a reasonable choice.
+
+```kama
+config.sessionTickets(lifetime: Duration.fromSecs(s: 7200i64));   // on the client's and the server's configuration
+// The server's ticket arrives after the handshake, with a read.
+Optional<TlsSession> kept = tls.takeSession();
+// Later, a new stream through the same configuration, for the same server name, before its handshake:
+next.resumeWith(session: give s);                                   // s from `kept`
+bool fast = next.resumed();                                         // false when it fell back to a full handshake
+```
+
+A resumed session always runs a fresh (EC)DHE key exchange, and 0-RTT data is never sent or accepted. A `TlsSession`
+lives in memory only and is used once. TLS 1.2 does not resume, and a server that asks for client certificates issues
+no tickets, since a resumed session carries none.
 
 A failed handshake says why as data: `TlsError::Certificate(flags, reasons)` names every check the peer's
 certificate failed ("The certificate validity has expired", "The certificate Common Name (CN) does not match…").

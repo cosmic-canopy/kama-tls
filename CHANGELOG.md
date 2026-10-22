@@ -6,6 +6,31 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.8]
+
+Needs **kama ≥ 0.9.690**, and so do its tests.
+
+### Added
+- **TLS 1.3 session resumption** (`TlsConfig.sessionTickets(lifetime:)`). A client keeps the ticket a server sends
+  (`TlsStream.takeSession()` → `TlsSession`) and offers it to a later connection (`resumeWith(session:)`), which then
+  skips the certificate and its signature. A resumed session always runs a fresh (EC)DHE key exchange, so it keeps
+  forward secrecy; pure PSK and 0-RTT are never offered or accepted. `TlsStream.resumed()` tells a resumed handshake
+  from a full one. A session resumes only through the configuration that made it (or a `share()` of it), for the same
+  server name, within both ends' lifetimes; otherwise `resumeWith` answers code -5, or the handshake is simply a full
+  one. A `TlsSession` lives in memory only, is used once, and is `Sendable`. TLS 1.2 does not resume, and a server that
+  verifies or asks for client certificates cannot issue tickets (a resumed session carries none).
+
+### Fixed
+- **A client reading from a server that sends session tickets no longer stalls.** A TLS 1.3 client that met a
+  NewSessionTicket waited on the transport for bytes it already held (so a read against an OpenSSL server, which sends
+  two tickets by default, could block or answer a spurious `WouldBlock`), and a write right after such a read failed.
+  Both are fixed; a client without `sessionTickets` keeps no ticket, as before.
+
+### Changed
+- **A client no longer advertises PSK key-exchange modes unless it opts in to session tickets**, nor asks for a TLS
+  1.2 session ticket, so servers send it none it would not use. Pure-PSK resumption (psk_ke) is compiled out, so no
+  configuration can offer or accept it.
+
 ## [0.1.7] — 2026-10-22
 
 Needs **kama ≥ 0.9.690**, and so do its tests.
