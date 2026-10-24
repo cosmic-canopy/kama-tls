@@ -6,7 +6,7 @@ All notable changes to this package are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.1.8]
+## [0.1.8] — 2026-10-24
 
 Needs **kama ≥ 0.9.690**, and so do its tests.
 
