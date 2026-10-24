@@ -18,10 +18,20 @@ client read that could wait on the transport for bytes it held, against any serv
 maintainer publishes it from the registry project on the other machine once CI is green; the CHANGELOG heading then
 takes the date.
 
-Phases 7 and 9 leave three runs for the Mac, none of which blocks the next phase. CI's Linux x86-64 and macOS arm64
-legs cover the POSIX paths.
-- the gate on macOS arm64 and Linux aarch64 with the dev compiler;
-- `tools/tsan.sh`, which phase 9's ticket context, shared by isolates, adds to.
+**On the Mac, next**, in this order:
+1. Pull `main`.
+2. Run the gate with the dev compiler on macOS arm64 (`KAMA=$PWD/../cstar/out/Darwin-arm64/kama tools/test.sh`) and on
+   Linux aarch64 in `localhost/kama-dev` (`AGENTS.tls.md`). Phases 7 and 9 changed C that CI builds only with kama
+   0.9.690, so these are the dev compiler's runs on POSIX.
+3. Run `tools/tsan.sh`.
+   - It now copies `tests/csrc` and builds `raw_client.c`, which phase 9 added for every target. That manifest was
+     checked on Windows on 2026-10-23 without the TSan flags; Windows' clang has no ThreadSanitizer.
+   - Phase 9 adds two things isolates share: a server configuration's ticket context (`ssl_ticket.c` locks its own
+     state) and a `TlsSession` moved between isolates.
+   - `shared_test` sets tickets on a shared configuration, but no test yet issues and accepts tickets on two isolates
+     at once through one shared server configuration. Add one then, so ThreadSanitizer sees `ssl_ticket.c`'s lock in
+     use.
+4. Phase 8, WebAssembly: its [first steps](#webassembly-phase-8-next-on-the-mac).
 
 **Next: WebAssembly (phase 8) on the Mac.** The maintainer moved phase 8 to the Mac on 2026-10-22. It needs emcc and
 node, which the Mac's `kama-dev` container has and the Windows machine does not, and kama has never built for wasm on a
