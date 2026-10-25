@@ -1,6 +1,6 @@
 # Roadmap
 
-Where this is, 2026-10-22: `TlsConfig`, `TlsStream<S>` and `Certificate` are done and tested, debug and release, on
+Where this is, 2026-10-24: `TlsConfig`, `TlsStream<S>` and `Certificate` are done and tested, debug and release, on
 macOS arm64, Linux aarch64 and x86-64, and Windows x86-64. Before 0.1.0 everything was exercised end to end against PostgreSQL 14–19, which added
 failures in words (alerts by name, key and PEM errors), the RFC 5929 SHA-224 fix, chain verification without SNI,
 certificate names from a session or a file, CRLs with OpenSSL's every-certificate rule, whether the server asked for a
@@ -13,10 +13,15 @@ holds several identities and chooses one per handshake by SNI (phase 5); 0.1.5 (
 configurations fixed (phase 6); 0.1.6 (2026-10-20), builds on kama 0.9.690 and later, and its tests need 0.9.690;
 0.1.7 (2026-10-22), Windows (phase 7), which raises the floor to 0.9.690.
 
-0.1.8 is TLS 1.3 session resumption (phase 9), built and gated on the Windows machine on 2026-10-22. It also fixes a
-client read that could wait on the transport for bytes it held, against any server that sends TLS 1.3 tickets. The
-maintainer publishes it from the registry project on the other machine once CI is green; the CHANGELOG heading then
-takes the date.
+0.1.8 (2026-10-24) is TLS 1.3 session resumption (phase 9), built and gated on the Windows machine. It also fixes a
+client read that could wait on the transport for bytes it held, against any server that sends TLS 1.3 tickets.
+
+**Triage, 2026-10-24: read [docs/TRIAGE.md](TRIAGE.md) before choosing the next work.** It covers what a
+production-grade package still needs, and the plan for a full security audit:
+- findings T1–T11, among them the default cipher suites, KeyUpdate, name constraints and the CN fallback;
+- a comparison with rustls, Go, OpenSSL and BoringSSL, each checked that day;
+- the audit's areas, tools and order;
+- the decisions waiting on the maintainer.
 
 **On the Mac, next**, in this order:
 1. Pull `main`.
@@ -51,7 +56,7 @@ Windows host. Phase 9 is the same on every platform, so it went first, on Window
 | 6 | Setters on a shared configuration race each other and a session being made from it; see [Shared configurations](#shared-configurations) | **done** (0.1.5, 2026-10-19) |
 | 7 | Windows; see [Platforms](#platforms) | **done** (0.1.7, 2026-10-22) |
 | 8 | WebAssembly (`--target WASM`), the wasm leg `AGENTS.package.md` asks of a package that vendors C; see [Platforms](#platforms) | **next, on the Mac** |
-| 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | **done** (0.1.8, unpublished) |
+| 9 | Session resumption on TLS 1.3; see [Session resumption](#session-resumption) | **done** (0.1.8, 2026-10-24) |
 | 10 | Session resumption on TLS 1.2; see [Session resumption](#session-resumption) | planned |
 | 11 | Bare metal (`--target EMBEDDED`); see [Platforms](#platforms) | planned, questions first |
 | 12 | `trustSystem()` chains verified by the operating system, on Windows and macOS; see [OS verification](#os-verification) | planned, design first |
